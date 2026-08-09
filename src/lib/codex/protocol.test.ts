@@ -27,4 +27,14 @@ describe("parseCodexEvent", () => {
       "Codex event must use JSON-RPC 2.0",
     );
   });
+
+  it("rejects a request-shaped message with an id", () => {
+    expect(() =>
+      parseCodexEvent({
+        jsonrpc: "2.0",
+        id: "request_123",
+        method: "thread/started",
+      }),
+    ).toThrow("Codex event must not include an id");
+  });
 });

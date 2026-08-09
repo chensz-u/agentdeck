@@ -19,6 +19,10 @@ export function parseCodexEvent(input: unknown): CodexEvent {
     throw new TypeError("Codex event must use JSON-RPC 2.0");
   }
 
+  if ("id" in input) {
+    throw new TypeError("Codex event must not include an id");
+  }
+
   if (typeof input.method !== "string") {
     throw new TypeError("Codex event must include a method");
   }
