@@ -18,12 +18,12 @@
   "devDependencies": {
     "@next/eslint-plugin-next": "15.5.9",
     "@playwright/test": "1.55.1",
-    "@typescript-eslint/parser": "8.66.0",
     "@types/node": "22.17.2",
     "@types/react": "19.1.12",
     "@types/react-dom": "19.1.9",
+    "@typescript-eslint/parser": "8.66.0",
     "eslint": "9.34.0",
-    "prisma": "6.19.0",
+    "prisma": "^6.19.0",
     "tailwindcss": "4.1.13",
     "typescript": "5.9.2",
     "vitest": "3.2.4"
