@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   beginAppServerRun,
+  disposeAppServerChild,
+  normalizeAppServerNotification,
   type AppServerTransport,
 } from "./app-server-adapter";
 import { FallbackCodexAdapter } from "./exec-fallback-adapter";
@@ -32,6 +34,29 @@ class FakeTransport implements AppServerTransport {
 }
 
 describe("app-server protocol", () => {
+  it("forwards app-server notifications that omit the JSON-RPC version", () => {
+    expect(normalizeAppServerNotification({
+      method: "remoteControl/status/changed",
+      params: { status: "connected" },
+    })).toEqual({ type: "remoteControl/status/changed", params: { status: "connected" } });
+  });
+
+  it("disposes a failed startup child before the exec fallback can launch", () => {
+    const calls: string[] = [];
+    const disposable = {
+      killed: false,
+      kill: () => { calls.push("kill"); },
+      removeAllListeners: () => { calls.push("process"); },
+      stdin: { removeAllListeners: () => { calls.push("stdin"); } },
+      stdout: { removeAllListeners: () => { calls.push("stdout"); } },
+      stderr: { removeAllListeners: () => { calls.push("stderr"); } },
+    };
+
+    disposeAppServerChild(disposable);
+
+    expect(calls).toEqual(["stdin", "stdout", "stderr", "process", "kill"]);
+  });
+
   it("initializes, starts a thread, and starts a turn using the returned thread id", async () => {
     const transport = new FakeTransport();
     const run = await beginAppServerRun(transport, { cwd: "C:\\fixture", prompt: "Do work" });

@@ -2,6 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 
 import { parseCodexEvent } from "./protocol";
 import type { CodexAdapter, CodexRunCompletion, CodexRunHandle, CodexRunRequest } from "./codex-adapter";
+import type { CodexEvent } from "./protocol";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -11,6 +12,35 @@ function isRecord(value: unknown): value is JsonRecord {
 
 function messageError(value: unknown): Error {
   return new Error(isRecord(value) && typeof value.message === "string" ? value.message : "Codex app-server protocol error");
+}
+
+/** App-server emits some server notifications without the JSON-RPC envelope. */
+export function normalizeAppServerNotification(message: unknown): CodexEvent | null {
+  if (!isRecord(message) || typeof message.method !== "string" || "id" in message) return null;
+  if (message.jsonrpc === undefined) return { type: message.method, params: message.params };
+  try {
+    return parseCodexEvent(message);
+  } catch {
+    return null;
+  }
+}
+
+type DisposableAppServerChild = {
+  killed?: boolean;
+  kill(): unknown;
+  removeAllListeners(): unknown;
+  stdin: { removeAllListeners(): unknown };
+  stdout: { removeAllListeners(): unknown };
+  stderr: { removeAllListeners(): unknown };
+};
+
+/** Remove local handlers and terminate a failed app-server before falling back. */
+export function disposeAppServerChild(child: DisposableAppServerChild): void {
+  child.stdin.removeAllListeners();
+  child.stdout.removeAllListeners();
+  child.stderr.removeAllListeners();
+  child.removeAllListeners();
+  if (!child.killed) child.kill();
 }
 
 export interface AppServerTransport {
@@ -113,9 +143,8 @@ export class AppServerAdapter implements CodexAdapter {
         try {
           const message = JSON.parse(line);
           receive?.(message);
-          if (isRecord(message) && typeof message.method === "string" && !("id" in message)) {
-            void Promise.resolve(request.onEvent(parseCodexEvent(message)));
-          }
+          const event = normalizeAppServerNotification(message);
+          if (event) void Promise.resolve(request.onEvent(event));
         } catch { void Promise.resolve(request.onEvent({ type: "codex/invalid-json-rpc", params: { line } })); }
       }
     });
@@ -124,11 +153,17 @@ export class AppServerAdapter implements CodexAdapter {
       child.once("close", (exitCode) => resolve({ exitCode, error: exitCode === 0 ? undefined : stderr.trim() || `codex app-server exited with ${exitCode}` }));
     });
     const startup = beginAppServerRun(transport, { cwd: request.cwd, prompt: request.prompt });
-    const protocol = await Promise.race([
-      startup,
-      processExit.then((result) => Promise.reject(new Error(result.error ?? "codex app-server exited during startup"))),
-      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("codex app-server protocol startup timed out")), this.startupTimeoutMs)),
-    ]);
+    let protocol: AppServerRun;
+    try {
+      protocol = await Promise.race([
+        startup,
+        processExit.then((result) => Promise.reject(new Error(result.error ?? "codex app-server exited during startup"))),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("codex app-server protocol startup timed out")), this.startupTimeoutMs)),
+      ]);
+    } catch (error) {
+      disposeAppServerChild(child);
+      throw error;
+    }
     this.processes.set(request.runId, { process: child, interrupt: protocol.interrupt });
     const completed = Promise.race([protocol.completed, processExit]);
     completed.finally(() => { this.processes.delete(request.runId); if (!child.killed) child.kill(); }).catch(() => undefined);
