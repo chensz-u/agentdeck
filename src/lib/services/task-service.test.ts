@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { TaskStatus, type AgentRun, type Task } from "../domain/types";
+import {
+  AgentRunStatus,
+  TaskStatus,
+  type AgentRun,
+  type Task,
+} from "../domain/types";
 import { TaskService, type TaskRepository } from "./task-service";
 
 function task(overrides: Partial<Task> = {}): Task {
@@ -43,6 +48,15 @@ class InMemoryTaskRepository implements TaskRepository {
 }
 
 describe("TaskService.createRetryTask", () => {
+  it("exposes the supported agent run statuses", () => {
+    expect(AgentRunStatus).toEqual({
+      RUNNING: "RUNNING",
+      SUCCEEDED: "SUCCEEDED",
+      FAILED: "FAILED",
+      CANCELLED: "CANCELLED",
+    });
+  });
+
   it("creates a TODO retry that preserves its original task context", async () => {
     const original = task();
     const repository = new InMemoryTaskRepository([original]);
@@ -64,7 +78,7 @@ describe("TaskService.createRetryTask", () => {
       id: "run-original",
       taskId: original.id,
       agent: "codex",
-      status: "FAILED",
+      status: AgentRunStatus.FAILED,
       pid: 1234,
       exitCode: 1,
       error: "Agent exited unexpectedly",

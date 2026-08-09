@@ -7,6 +7,13 @@ export enum TaskStatus {
   CANCELLED = "CANCELLED",
 }
 
+export enum AgentRunStatus {
+  RUNNING = "RUNNING",
+  SUCCEEDED = "SUCCEEDED",
+  FAILED = "FAILED",
+  CANCELLED = "CANCELLED",
+}
+
 export type Project = {
   id: string;
   name: string;
@@ -33,7 +40,7 @@ export type AgentRun = {
   id: string;
   taskId: string;
   agent: string;
-  status: string;
+  status: AgentRunStatus;
   pid: number | null;
   exitCode: number | null;
   error: string | null;
