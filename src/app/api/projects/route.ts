@@ -9,7 +9,7 @@ import {
 const createProjectSchema = z.object({
   name: z.string().trim().min(1),
   path: z.string().trim().min(1),
-});
+}).strict();
 
 export interface ProjectStore extends ProjectRepository {
   listProjects(): Promise<RegisteredProject[]>;

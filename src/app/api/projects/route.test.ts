@@ -57,6 +57,27 @@ describe("POST /api/projects", () => {
     expect(response.status).toBe(400);
   });
 
+  it("rejects payloads with command-related fields", async () => {
+    const fixture = createGitFixture();
+    fixtures.push(fixture);
+    const handlers = createProjectsRouteHandlers(new InMemoryProjectStore());
+
+    const response = await handlers.POST(
+      new Request("http://localhost/api/projects", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: "Fixture API",
+          path: fixture,
+          cwd: fixture,
+          shell: "powershell.exe",
+        }),
+      }),
+    );
+
+    expect(response.status).toBe(400);
+  });
+
   it("registers a canonical Git project", async () => {
     const fixture = createGitFixture();
     fixtures.push(fixture);
