@@ -14,20 +14,23 @@ export class GitService {
     const [unstaged, staged, untracked] = await Promise.all([
       this.runGit(project, ["diff", "--name-only"]),
       this.runGit(project, ["diff", "--cached", "--name-only"]),
-      this.runGit(project, ["ls-files", "--others", "--exclude-standard"]),
+      this.runGit(project, ["ls-files", "-z", "--others", "--exclude-standard"]),
     ]);
-    return [...new Set([unstaged.stdout, staged.stdout, untracked.stdout]
-      .flatMap((output) => output.split("\n").filter(Boolean)))];
+    return [...new Set([
+      ...unstaged.stdout.split("\n").filter(Boolean),
+      ...staged.stdout.split("\n").filter(Boolean),
+      ...untracked.stdout.split("\0").filter(Boolean),
+    ])];
   }
 
   async getDiff(project: GitProject): Promise<string> {
     const [unstaged, staged, untracked] = await Promise.all([
       this.runGit(project, ["diff", "--no-color"]),
       this.runGit(project, ["diff", "--cached", "--no-color"]),
-      this.runGit(project, ["ls-files", "--others", "--exclude-standard"]),
+      this.runGit(project, ["ls-files", "-z", "--others", "--exclude-standard"]),
     ]);
     const untrackedDiffs = await Promise.all(
-      untracked.stdout.split("\n").filter(Boolean).map((path) => this.runGitDiffForUntrackedFile(project, path)),
+      untracked.stdout.split("\0").filter(Boolean).map((path) => this.runGitDiffForUntrackedFile(project, path)),
     );
     return [unstaged.stdout, staged.stdout, ...untrackedDiffs].join("");
   }

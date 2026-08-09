@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { GitService } from "./git-service";
 
@@ -23,6 +23,7 @@ describe("GitService", () => {
   const fixtures: string[] = [];
 
   afterEach(() => {
+    vi.restoreAllMocks();
     for (const fixture of fixtures.splice(0)) {
       rmSync(fixture, { recursive: true, force: true });
     }
@@ -51,6 +52,32 @@ describe("GitService", () => {
     ).resolves.toEqual(["note.txt", "staged.txt", "untracked.txt"]);
     await expect(service.getDiff({ path, isGitRepository: true })).resolves.toContain("+staged addition");
     await expect(service.getDiff({ path, isGitRepository: true })).resolves.toContain("+untracked addition");
+  });
+
+  it("keeps an untracked filename containing a newline intact in the review", async () => {
+    const untrackedPath = "untracked\nname.txt";
+    const service = new GitService();
+    type TestableGitService = {
+      runGit(project: unknown, args: readonly string[]): Promise<{ stdout: string }>;
+    };
+    const runGit = vi.spyOn(GitService.prototype as unknown as TestableGitService, "runGit")
+      .mockImplementation(async (_project, args) => {
+        if (args[0] === "ls-files") return { stdout: `${untrackedPath}\0` };
+        if (args.includes("--no-index")) {
+          return Promise.reject(Object.assign(new Error("diff found"), {
+            stdout: `diff --git a/${untrackedPath} b/${untrackedPath}\n+newline filename content\n`,
+          }));
+        }
+        return { stdout: "" };
+      });
+
+    const project = { path: "C:\\fixture", isGitRepository: true };
+    await expect(service.getChangedPaths(project)).resolves.toEqual([untrackedPath]);
+    await expect(service.getDiff(project)).resolves.toContain("+newline filename content");
+    expect(runGit).toHaveBeenCalledWith(project, ["ls-files", "-z", "--others", "--exclude-standard"]);
+    expect(runGit).toHaveBeenCalledWith(project, [
+      "diff", "--no-index", "--no-color", "--", "/dev/null", untrackedPath,
+    ]);
   });
 
   it("returns a colorless diff when Git color output is forced", async () => {
