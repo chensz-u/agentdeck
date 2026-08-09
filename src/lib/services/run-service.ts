@@ -4,6 +4,10 @@ import type { RunEventInput } from "./run-event-store";
 
 export interface RunLifecycleRepository {
   findTaskWithProject(taskId: string): Promise<{ task: Task; project: Project } | null>;
+  claimTaskRun(
+    taskId: string,
+    input: Omit<AgentRun, "id" | "startedAt" | "finishedAt" | "taskId">,
+  ): Promise<{ run: AgentRun; task: Task; project: Project }>;
   createRun(input: Omit<AgentRun, "id" | "startedAt" | "finishedAt">): Promise<AgentRun>;
   updateTaskStatus(taskId: string, status: TaskStatus): Promise<void>;
   updateRun(
@@ -47,14 +51,7 @@ export class RunService {
   }
 
   async launch(taskId: string): Promise<AgentRun> {
-    const context = await this.options.repository.findTaskWithProject(taskId);
-    if (!context) throw new Error(`Task ${taskId} was not found`);
-    if (context.task.status !== TaskStatus.TODO) {
-      throw new Error(`Task ${taskId} is not ready to run`);
-    }
-
-    const run = await this.options.repository.createRun({
-      taskId,
+    const context = await this.options.repository.claimTaskRun(taskId, {
       agent: "codex",
       status: AgentRunStatus.RUNNING,
       pid: null,
@@ -62,7 +59,7 @@ export class RunService {
       error: null,
       logPath: `.agentdeck/runs/${taskId}.jsonl`,
     });
-    await this.options.repository.updateTaskStatus(taskId, TaskStatus.RUNNING);
+    const { run } = context;
     await this.options.events.append(run.id, { type: "run/started", params: { taskId } });
 
     try {

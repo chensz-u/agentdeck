@@ -119,6 +119,32 @@ export class LocalRepository implements ProjectStore, TaskApiStore, RunLifecycle
     return project ? { task: asTask(task), project: asProject(project) } : null;
   }
 
+  async claimTaskRun(
+    taskId: string,
+    input: Omit<AgentRun, "id" | "startedAt" | "finishedAt" | "taskId">,
+  ): Promise<{ run: AgentRun; task: Task; project: Project }> {
+    return this.mutate(() => {
+      const task = this.data.tasks.find((candidate) => candidate.id === taskId);
+      if (!task) throw new Error(`Task ${taskId} was not found`);
+      if (task.status !== TaskStatus.TODO) throw new Error(`Task ${taskId} is not ready to run`);
+      const project = this.data.projects.find((candidate) => candidate.id === task.projectId);
+      if (!project) throw new Error(`Project ${task.projectId} was not found`);
+
+      const now = new Date().toISOString();
+      const run: StoredRun = {
+        ...input,
+        id: randomUUID(),
+        taskId,
+        startedAt: now,
+        finishedAt: null,
+      };
+      task.status = TaskStatus.RUNNING;
+      task.updatedAt = now;
+      this.data.runs.push(run);
+      return { run: asRun(run), task: asTask(task), project: asProject(project) };
+    });
+  }
+
   async createRun(input: Omit<AgentRun, "id" | "startedAt" | "finishedAt">): Promise<AgentRun> {
     return this.mutate(() => {
       const run: StoredRun = {

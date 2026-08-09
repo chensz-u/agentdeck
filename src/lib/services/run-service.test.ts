@@ -51,6 +51,25 @@ class InMemoryRunRepository implements RunLifecycleRepository {
     return found ? { task: found, project: project() } : null;
   }
 
+  async claimTaskRun(
+    id: string,
+    input: Omit<AgentRun, "id" | "startedAt" | "finishedAt" | "taskId">,
+  ) {
+    const found = this.tasks.find((candidate) => candidate.id === id);
+    if (!found) throw new Error(`Task ${id} was not found`);
+    if (found.status !== TaskStatus.TODO) throw new Error(`Task ${id} is not ready to run`);
+    const created: AgentRun = {
+      ...input,
+      taskId: id,
+      id: `run-${this.runs.length + 1}`,
+      startedAt: new Date("2026-08-09T12:00:00.000Z"),
+      finishedAt: null,
+    };
+    this.runs.push(created);
+    found.status = TaskStatus.RUNNING;
+    return { run: created, task: found, project: project() };
+  }
+
   async createRun(input: Omit<AgentRun, "id" | "startedAt" | "finishedAt">): Promise<AgentRun> {
     const created: AgentRun = {
       ...input,
@@ -135,6 +154,16 @@ describe("RunService", () => {
       type: "item/started",
       params: { item: "work" },
     });
+  });
+
+  it("allows only one concurrent launch for a TODO task", async () => {
+    const { repository, service } = createService();
+
+    const results = await Promise.allSettled([service.launch("task-1"), service.launch("task-1")]);
+
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+    expect(repository.runs).toHaveLength(1);
   });
 
   it("moves a successful run to REVIEW and collects its Git diff", async () => {
