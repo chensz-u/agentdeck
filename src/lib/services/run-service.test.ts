@@ -179,4 +179,17 @@ describe("RunService", () => {
     expect(repository.tasks[0].status).toBe(TaskStatus.CANCELLED);
     expect(repository.runs[0]).toMatchObject({ status: AgentRunStatus.CANCELLED });
   });
+
+  it("returns a persisted FAILED run when adapter startup fails", async () => {
+    const adapter: CodexAdapter = {
+      launch: async () => { throw new Error("app-server and fallback unavailable"); },
+      stop: async () => undefined,
+    };
+    const { repository, service } = createService(adapter as FakeAdapter);
+
+    const run = await service.launch("task-1");
+
+    expect(run).toMatchObject({ status: AgentRunStatus.FAILED, error: "app-server and fallback unavailable" });
+    expect(repository.tasks[0].status).toBe(TaskStatus.FAILED);
+  });
 });
