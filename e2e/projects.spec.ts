@@ -11,6 +11,11 @@ function createGitFixture(): string {
   return directory;
 }
 
+test("identifies the root page as AgentDeck Focus", async ({ page }) => {
+  await page.goto("/");
+  await expect(page).toHaveTitle("AgentDeck Focus");
+});
+
 test("registers a Git project and creates a TODO task", async ({ page }) => {
   const fixture = createGitFixture();
 
