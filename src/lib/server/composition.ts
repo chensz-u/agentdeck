@@ -16,7 +16,7 @@ export type ServerComposition = {
 };
 
 function createServerComposition(): ServerComposition {
-  const repository = new LocalRepository();
+  const repository = new LocalRepository(process.env.AGENTDECK_DATA_PATH || undefined);
   const runEventBus = new RunEventBus();
   const runEventStore = new RunEventStore({ bus: runEventBus });
   return {
