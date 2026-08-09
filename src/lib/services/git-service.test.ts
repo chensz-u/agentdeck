@@ -37,6 +37,22 @@ describe("GitService", () => {
     ).resolves.toEqual(["note.txt"]);
   });
 
+  it("includes staged and untracked files in review paths and diff text", async () => {
+    const path = createGitFixture();
+    fixtures.push(path);
+    writeFileSync(join(path, "staged.txt"), "staged addition\n");
+    execFileSync("git", ["add", "staged.txt"], { cwd: path });
+    writeFileSync(join(path, "untracked.txt"), "untracked addition\n");
+
+    const service = new GitService();
+
+    await expect(
+      service.getChangedPaths({ path, isGitRepository: true }),
+    ).resolves.toEqual(["note.txt", "staged.txt", "untracked.txt"]);
+    await expect(service.getDiff({ path, isGitRepository: true })).resolves.toContain("+staged addition");
+    await expect(service.getDiff({ path, isGitRepository: true })).resolves.toContain("+untracked addition");
+  });
+
   it("returns a colorless diff when Git color output is forced", async () => {
     const path = createGitFixture();
     fixtures.push(path);

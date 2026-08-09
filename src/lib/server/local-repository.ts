@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -20,6 +20,7 @@ type StoredData = {
 };
 
 const emptyData = (): StoredData => ({ projects: [], tasks: [], runs: [], diffs: {} });
+const restartError = "AgentDeck restarted before this run completed; the process cannot be recovered.";
 
 function asProject(project: StoredProject): Project {
   return { ...project, createdAt: new Date(project.createdAt), updatedAt: new Date(project.updatedAt) };
@@ -211,10 +212,39 @@ export class LocalRepository implements ProjectStore, TaskApiStore, RunLifecycle
       if (!Array.isArray(data.projects) || !Array.isArray(data.tasks) || !Array.isArray(data.runs) || !data.diffs) {
         throw new Error("missing storage collections");
       }
-      return { projects: data.projects, tasks: data.tasks, runs: data.runs, diffs: data.diffs } as StoredData;
+      const loaded = { projects: data.projects, tasks: data.tasks, runs: data.runs, diffs: data.diffs } as StoredData;
+      if (this.reconcileInterruptedWork(loaded)) this.writeSynchronously(loaded);
+      return loaded;
     } catch (error) {
       throw new Error(`Unable to read AgentDeck local storage at ${this.filePath}: ${error instanceof Error ? error.message : String(error)}`);
     }
+  }
+
+  private reconcileInterruptedWork(data: StoredData): boolean {
+    const now = new Date().toISOString();
+    const interruptedTaskIds = new Set<string>();
+    for (const run of data.runs) {
+      if (run.status !== AgentRunStatus.RUNNING) continue;
+      run.status = AgentRunStatus.FAILED;
+      run.error = restartError;
+      run.finishedAt = now;
+      interruptedTaskIds.add(run.taskId);
+    }
+    let changed = interruptedTaskIds.size > 0;
+    for (const task of data.tasks) {
+      if (task.status !== TaskStatus.RUNNING && !interruptedTaskIds.has(task.id)) continue;
+      task.status = TaskStatus.FAILED;
+      task.updatedAt = now;
+      changed = true;
+    }
+    return changed;
+  }
+
+  private writeSynchronously(data: StoredData): void {
+    mkdirSync(dirname(this.filePath), { recursive: true });
+    const temporaryPath = `${this.filePath}.${randomUUID()}.tmp`;
+    writeFileSync(temporaryPath, JSON.stringify(data), "utf8");
+    renameSync(temporaryPath, this.filePath);
   }
 
   private async mutate<T>(mutation: () => T): Promise<T> {

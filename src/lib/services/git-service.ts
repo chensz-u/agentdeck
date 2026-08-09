@@ -11,13 +11,25 @@ export type GitProject = {
 
 export class GitService {
   async getChangedPaths(project: GitProject): Promise<string[]> {
-    const { stdout } = await this.runGit(project, ["diff", "--name-only"]);
-    return stdout.split("\n").filter(Boolean);
+    const [unstaged, staged, untracked] = await Promise.all([
+      this.runGit(project, ["diff", "--name-only"]),
+      this.runGit(project, ["diff", "--cached", "--name-only"]),
+      this.runGit(project, ["ls-files", "--others", "--exclude-standard"]),
+    ]);
+    return [...new Set([unstaged.stdout, staged.stdout, untracked.stdout]
+      .flatMap((output) => output.split("\n").filter(Boolean)))];
   }
 
   async getDiff(project: GitProject): Promise<string> {
-    const { stdout } = await this.runGit(project, ["diff", "--no-color"]);
-    return stdout;
+    const [unstaged, staged, untracked] = await Promise.all([
+      this.runGit(project, ["diff", "--no-color"]),
+      this.runGit(project, ["diff", "--cached", "--no-color"]),
+      this.runGit(project, ["ls-files", "--others", "--exclude-standard"]),
+    ]);
+    const untrackedDiffs = await Promise.all(
+      untracked.stdout.split("\n").filter(Boolean).map((path) => this.runGitDiffForUntrackedFile(project, path)),
+    );
+    return [unstaged.stdout, staged.stdout, ...untrackedDiffs].join("");
   }
 
   private async runGit(project: GitProject, args: readonly string[]) {
@@ -26,5 +38,17 @@ export class GitService {
     }
 
     return execFileAsync("git", args, { cwd: project.path });
+  }
+
+  private async runGitDiffForUntrackedFile(project: GitProject, path: string): Promise<string> {
+    try {
+      const { stdout } = await this.runGit(project, ["diff", "--no-index", "--no-color", "--", "/dev/null", path]);
+      return stdout;
+    } catch (error) {
+      if (error && typeof error === "object" && "stdout" in error) {
+        return String(error.stdout);
+      }
+      throw error;
+    }
   }
 }
