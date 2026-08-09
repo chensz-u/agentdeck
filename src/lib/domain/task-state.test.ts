@@ -1,0 +1,22 @@
+import { describe, expect, it } from "vitest";
+
+import { TaskStatus } from "./types";
+import { canTransitionTask, transitionTask } from "./task-state";
+
+describe("task state transitions", () => {
+  it("allows each legal transition", () => {
+    expect(canTransitionTask(TaskStatus.TODO, TaskStatus.RUNNING)).toBe(true);
+    expect(canTransitionTask(TaskStatus.RUNNING, TaskStatus.REVIEW)).toBe(true);
+    expect(canTransitionTask(TaskStatus.RUNNING, TaskStatus.FAILED)).toBe(true);
+    expect(canTransitionTask(TaskStatus.RUNNING, TaskStatus.CANCELLED)).toBe(true);
+    expect(canTransitionTask(TaskStatus.REVIEW, TaskStatus.DONE)).toBe(true);
+  });
+
+  it("rejects illegal transitions", () => {
+    expect(canTransitionTask(TaskStatus.TODO, TaskStatus.DONE)).toBe(false);
+    expect(canTransitionTask(TaskStatus.FAILED, TaskStatus.RUNNING)).toBe(false);
+    expect(() => transitionTask(TaskStatus.REVIEW, TaskStatus.FAILED)).toThrow(
+      "Cannot transition task from REVIEW to FAILED",
+    );
+  });
+});

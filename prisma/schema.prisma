@@ -1,0 +1,76 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+enum TaskStatus {
+  TODO
+  RUNNING
+  REVIEW
+  DONE
+  FAILED
+  CANCELLED
+}
+
+enum AgentRunStatus {
+  RUNNING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
+model Project {
+  id         String   @id @default(cuid())
+  name       String
+  path       String   @unique
+  gitEnabled Boolean  @default(false)
+  gitRemote  String?
+  gitBranch  String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  tasks      Task[]
+
+  @@index([updatedAt])
+}
+
+model Task {
+  id           String     @id @default(cuid())
+  projectId    String
+  parentTaskId String?
+  title        String
+  prompt       String
+  status       TaskStatus @default(TODO)
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+  project      Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  parentTask   Task?      @relation("TaskRetries", fields: [parentTaskId], references: [id])
+  retries      Task[]     @relation("TaskRetries")
+  agentRuns    AgentRun[]
+
+  @@index([projectId, status])
+  @@index([parentTaskId])
+  @@index([updatedAt])
+}
+
+model AgentRun {
+  id        String         @id @default(cuid())
+  taskId    String
+  agent     String
+  status    AgentRunStatus @default(RUNNING)
+  pid       Int?
+  exitCode  Int?
+  error     String?
+  startedAt DateTime       @default(now())
+  finishedAt DateTime?
+  logPath   String?
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+  task      Task           @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([taskId, startedAt])
+  @@index([status])
+}
