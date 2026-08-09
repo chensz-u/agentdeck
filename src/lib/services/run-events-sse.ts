@@ -30,7 +30,7 @@ export function createRunEventsHandler({ store, bus }: RunEventsHandlerOptions) 
       throw error;
     }
 
-    let unsubscribe = () => undefined;
+    let unsubscribe: () => void = () => {};
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
         let replaying = true;
