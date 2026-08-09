@@ -1,8 +1,7 @@
-import { RunEventBus } from "../../../../../lib/services/run-event-bus";
-import { RunEventStore } from "../../../../../lib/services/run-event-store";
 import { createRunEventsHandler } from "../../../../../lib/services/run-events-sse";
+import { serverComposition } from "../../../../../lib/server/composition";
 
-const bus = new RunEventBus();
-const store = new RunEventStore({ bus });
-
-export const GET = createRunEventsHandler({ store, bus });
+export const GET = createRunEventsHandler({
+  store: serverComposition.runEventStore,
+  bus: serverComposition.runEventBus,
+});

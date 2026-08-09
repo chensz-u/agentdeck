@@ -8,6 +8,14 @@ export interface TaskRepository {
 export class TaskService {
   constructor(private readonly repository: TaskRepository) {}
 
+  async createTask(input: Pick<Task, "projectId" | "title" | "prompt">): Promise<Task> {
+    return this.repository.createTask({
+      ...input,
+      parentTaskId: null,
+      status: TaskStatus.TODO,
+    });
+  }
+
   async createRetryTask(originalTaskId: string): Promise<Task> {
     const original = await this.repository.findTask(originalTaskId);
 

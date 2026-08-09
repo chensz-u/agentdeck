@@ -1,6 +1,6 @@
-export async function POST(): Promise<Response> {
-  return Response.json(
-    { error: "Run service has not been configured" },
-    { status: 503 },
-  );
-}
+import { createTaskRunRouteHandlers } from "../../../../../lib/api/task-action-handlers";
+import { serverComposition } from "../../../../../lib/server/composition";
+
+const handlers = createTaskRunRouteHandlers(serverComposition.runService);
+
+export const POST = handlers.POST;

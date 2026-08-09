@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   createProjectsRouteHandlers,
   type ProjectStore,
-} from "./route";
+} from "../../../lib/api/project-route-handlers";
 import type { RegisteredProject } from "../../../lib/services/project-service";
 
 class InMemoryProjectStore implements ProjectStore {

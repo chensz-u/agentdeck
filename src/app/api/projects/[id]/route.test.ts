@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { createProjectRouteHandlers } from "./route";
-import type { ProjectStore } from "../route";
+import { createProjectRouteHandlers, type ProjectStore } from "../../../../lib/api/project-route-handlers";
 import type { RegisteredProject } from "../../../../lib/services/project-service";
 
 class InMemoryProjectStore implements ProjectStore {

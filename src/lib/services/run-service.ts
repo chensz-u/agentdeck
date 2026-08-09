@@ -104,6 +104,14 @@ export class RunService {
     await this.options.adapter.stop(runId);
   }
 
+  async stopTask(taskId: string, runId: string): Promise<void> {
+    const active = this.active.get(runId);
+    if (!active || active.task.id !== taskId) {
+      throw new Error(`Run ${runId} is not active for task ${taskId}`);
+    }
+    await this.stop(runId);
+  }
+
   async waitForCompletion(runId: string): Promise<void> {
     const active = this.active.get(runId);
     if (!active) return;

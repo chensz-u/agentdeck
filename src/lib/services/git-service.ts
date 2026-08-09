@@ -5,7 +5,8 @@ const execFileAsync = promisify(execFile);
 
 export type GitProject = {
   path: string;
-  isGitRepository: boolean;
+  gitEnabled?: boolean;
+  isGitRepository?: boolean;
 };
 
 export class GitService {
@@ -20,7 +21,7 @@ export class GitService {
   }
 
   private async runGit(project: GitProject, args: readonly string[]) {
-    if (!project.isGitRepository) {
+    if (!project.gitEnabled && !project.isGitRepository) {
       throw new Error("Project is not a Git repository");
     }
 

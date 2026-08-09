@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import { TaskStatus, type Task } from "../../../lib/domain/types";
-import { createTaskRunRouteHandlers } from "./[id]/run/handlers";
-import { createTaskStopRouteHandlers } from "./[id]/stop/handlers";
-import { createTaskRetryRouteHandlers } from "./[id]/retry/handlers";
+import {
+  createTaskRetryRouteHandlers,
+  createTaskRunRouteHandlers,
+  createTaskStopRouteHandlers,
+} from "../../../lib/api/task-action-handlers";
 
 const context = { params: Promise.resolve({ id: "task-1" }) };
 
@@ -38,7 +40,7 @@ describe("task action routes", () => {
   it("stops the requested run", async () => {
     const stopped: string[] = [];
     const handlers = createTaskStopRouteHandlers({
-      stop: async (runId) => { stopped.push(runId); },
+      stop: async (taskId, runId) => { stopped.push(`${taskId}:${runId}`); },
     });
 
     const response = await handlers.POST(
@@ -47,7 +49,7 @@ describe("task action routes", () => {
     );
 
     expect(response.status).toBe(204);
-    expect(stopped).toEqual(["run-1"]);
+    expect(stopped).toEqual(["task-1:run-1"]);
   });
 
   it("creates a retry without changing the original task", async () => {
