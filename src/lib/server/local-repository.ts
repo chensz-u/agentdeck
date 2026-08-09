@@ -92,6 +92,20 @@ export class LocalRepository implements ProjectStore, TaskApiStore, RunLifecycle
     return task ? asTask(task) : null;
   }
 
+  async findLatestRun(taskId: string): Promise<AgentRun | null> {
+    await this.writeQueue;
+    const run = this.data.runs
+      .filter((candidate) => candidate.taskId === taskId)
+      .sort((left, right) => right.startedAt.localeCompare(left.startedAt))[0];
+    return run ? asRun(run) : null;
+  }
+
+  async findDiff(runId: string): Promise<{ changedPaths: string[]; diff: string } | null> {
+    await this.writeQueue;
+    const review = this.data.diffs[runId];
+    return review ? { changedPaths: [...review.changedPaths], diff: review.diff } : null;
+  }
+
   async listTasks(projectId?: string): Promise<Task[]> {
     await this.writeQueue;
     return this.data.tasks

@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { TaskStatus, type Task } from "../domain/types";
+import { TaskStatus, type AgentRun, type Task } from "../domain/types";
 import type { RegisteredProject } from "../services/project-service";
 import { TaskService, type TaskRepository } from "../services/task-service";
 
@@ -47,14 +47,21 @@ export function createTaskRouteHandlers(repository: TaskApiStore) {
   };
 }
 
-export function createTaskDetailRouteHandlers(repository: Pick<TaskApiStore, "findTask">) {
+export type TaskDetailStore = Pick<TaskApiStore, "findTask"> & {
+  findLatestRun?(taskId: string): Promise<AgentRun | null>;
+  findDiff?(runId: string): Promise<{ changedPaths: string[]; diff: string } | null>;
+};
+
+export function createTaskDetailRouteHandlers(repository: TaskDetailStore) {
   return {
     async GET(_request: Request, context: RouteContext): Promise<Response> {
       const { id } = await context.params;
       const task = await repository.findTask(id);
-      return task
-        ? Response.json(task)
-        : Response.json({ error: "Task not found" }, { status: 404 });
+      if (!task) return Response.json({ error: "Task not found" }, { status: 404 });
+
+      const run = repository.findLatestRun ? await repository.findLatestRun(task.id) : null;
+      const review = run && repository.findDiff ? await repository.findDiff(run.id) : null;
+      return Response.json({ ...task, run, changedPaths: review?.changedPaths ?? [], diff: review?.diff ?? "" });
     },
   };
 }

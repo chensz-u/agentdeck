@@ -43,7 +43,7 @@ export default function ProjectWorkspacePage() {
         <div className="section-label"><h2 id="task-list-heading">Task queue</h2><span>{tasks.length}</span></div>
         {project && tasks.length === 0 ? <p className="muted">No tasks yet. Add the first brief above.</p> : tasks.map((task) => (
           <article className="task-row" key={task.id}>
-            <div><h3>{task.title}</h3><p>{task.prompt}</p></div>
+            <div><Link href={`/tasks/${task.id}`}><h3>{task.title}</h3></Link><p>{task.prompt}</p></div>
             <StatusBadge status={task.status} />
           </article>
         ))}
