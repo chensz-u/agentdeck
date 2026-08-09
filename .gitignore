@@ -3,6 +3,7 @@ node_modules/
 data/
 .agentdeck/
 coverage/
+test-results/
 *.tsbuildinfo
 .env*
 !.env.example

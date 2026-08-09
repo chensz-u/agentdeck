@@ -32,6 +32,7 @@ test("streams a stubbed run, can stop and retry it, then reviews the diff", asyn
 
     await page.getByRole("button", { name: "Run task" }).click();
     await expect(page.getByText("RUNNING", { exact: true })).toBeVisible();
+    await expect(page.getByText("codex/exec", { exact: true })).toBeVisible();
     await expect(page.getByText("stubbed activity")).toBeVisible();
     await page.getByRole("button", { name: "Stop run" }).click();
     await expect(page.getByText("CANCELLED", { exact: true })).toBeVisible();

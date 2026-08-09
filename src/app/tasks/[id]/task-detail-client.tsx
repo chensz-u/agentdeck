@@ -41,7 +41,7 @@ export default function TaskDetailClient({ taskId }: { taskId: string }) {
       setEvents((current) => current.some((item) => item.sequence === event.sequence) ? current : [...current, event]);
       if (event.type === "run/finished") void load();
     };
-    ["run/started", "item/started", "run/cancelling", "run/finished", "run/error"].forEach((type) => source.addEventListener(type, receive));
+    source.onmessage = receive;
     return () => source.close();
   }, [detail?.run?.id, load]);
 

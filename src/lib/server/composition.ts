@@ -22,7 +22,7 @@ class ControlledE2eAdapter implements CodexAdapter {
 
   async launch(request: CodexRunRequest) {
     this.launches += 1;
-    await request.onEvent({ type: "item/started", params: { message: "stubbed activity" } });
+    await request.onEvent({ type: "codex/exec", params: { message: "stubbed activity" } });
     const completed = new Promise<{ exitCode: number }>((resolve) => {
       this.completions.set(request.runId, resolve);
     });

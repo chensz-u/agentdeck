@@ -13,7 +13,7 @@ type RouteContext = {
 const encoder = new TextEncoder();
 
 function formatEvent(event: RunEvent): Uint8Array {
-  return encoder.encode(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+  return encoder.encode(`data: ${JSON.stringify(event)}\n\n`);
 }
 
 /** Creates an SSE handler with injectable dependencies for route-level tests. */

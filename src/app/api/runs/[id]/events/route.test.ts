@@ -34,9 +34,9 @@ describe("GET /api/runs/[id]/events", () => {
     expect(response.headers.get("content-type")).toContain("text/event-stream");
     const reader = response.body?.getReader();
     const firstChunk = await reader?.read();
-    expect(new TextDecoder().decode(firstChunk?.value)).toContain(
-      'event: run/started\ndata: {"sequence":1',
-    );
+    const frame = new TextDecoder().decode(firstChunk?.value);
+    expect(frame).toMatch(/^data: \{"sequence":1/);
+    expect(frame).not.toContain("event:");
     await reader?.cancel();
   });
 
@@ -79,6 +79,6 @@ describe("GET /api/runs/[id]/events", () => {
 
     const payload = new TextDecoder().decode(firstChunk?.value);
     expect(liveDeliveries).toBe(1);
-    expect(payload.match(/event: run\/started/g)).toHaveLength(1);
+    expect(payload.match(/data: \{"sequence":1/g)).toHaveLength(1);
   });
 });
