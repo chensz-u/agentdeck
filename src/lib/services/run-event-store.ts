@@ -54,7 +54,7 @@ function redact(value: unknown, key?: string): unknown {
   return value;
 }
 
-function assertRunId(runId: string): void {
+export function assertRunId(runId: string): void {
   if (!/^[A-Za-z0-9_-]+$/.test(runId)) {
     throw new TypeError("Invalid run id");
   }

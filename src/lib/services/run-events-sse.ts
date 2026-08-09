@@ -1,5 +1,5 @@
 import { RunEventBus } from "./run-event-bus";
-import { RunEventStore, type RunEvent } from "./run-event-store";
+import { assertRunId, RunEventStore, type RunEvent } from "./run-event-store";
 
 type RunEventsHandlerOptions = {
   store: RunEventStore;
@@ -20,10 +20,9 @@ function formatEvent(event: RunEvent): Uint8Array {
 export function createRunEventsHandler({ store, bus }: RunEventsHandlerOptions) {
   return async function GET(_request: Request, context: RouteContext): Promise<Response> {
     const { id } = await context.params;
-    let replayed: RunEvent[];
 
     try {
-      replayed = await store.replay(id);
+      assertRunId(id);
     } catch (error) {
       if (error instanceof TypeError && error.message === "Invalid run id") {
         return Response.json({ error: error.message }, { status: 400 });
@@ -33,23 +32,35 @@ export function createRunEventsHandler({ store, bus }: RunEventsHandlerOptions) 
 
     let unsubscribe = () => undefined;
     const stream = new ReadableStream<Uint8Array>({
-      start(controller) {
-        const lastReplayedSequence = replayed.at(-1)?.sequence ?? 0;
+      async start(controller) {
         let replaying = true;
+        let lastSentSequence = 0;
         const queued: RunEvent[] = [];
+        const send = (event: RunEvent) => {
+          if (event.sequence > lastSentSequence) {
+            lastSentSequence = event.sequence;
+            controller.enqueue(formatEvent(event));
+          }
+        };
+
         unsubscribe = bus.subscribe(id, (event) => {
           if (replaying) {
             queued.push(event);
           } else {
-            controller.enqueue(formatEvent(event));
+            send(event);
           }
         });
 
-        replayed.forEach((event) => controller.enqueue(formatEvent(event)));
-        replaying = false;
-        queued
-          .filter((event) => event.sequence > lastReplayedSequence)
-          .forEach((event) => controller.enqueue(formatEvent(event)));
+        try {
+          const replayed = await store.replay(id);
+          [...replayed, ...queued]
+            .sort((left, right) => left.sequence - right.sequence)
+            .forEach(send);
+          replaying = false;
+        } catch (error) {
+          unsubscribe();
+          controller.error(error);
+        }
       },
       cancel() {
         unsubscribe();
