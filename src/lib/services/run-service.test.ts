@@ -7,7 +7,7 @@ import {
   type Project,
   type Task,
 } from "../domain/types";
-import type { CodexAdapter, CodexRunRequest } from "../codex/codex-adapter";
+import type { CodexAdapter, CodexContinuation, CodexHumanInputResponse, CodexRunRequest } from "../codex/codex-adapter";
 import { RunService, type RunLifecycleRepository } from "./run-service";
 
 function task(overrides: Partial<Task> = {}): Task {
@@ -125,6 +125,10 @@ class FakeAdapter implements CodexAdapter {
     this.stopped.push(runId);
   }
 
+  async continueHumanInput(_input: CodexHumanInputResponse): Promise<CodexContinuation> {
+    throw new Error("Human input is not configured for this fake");
+  }
+
   complete(exitCode: number | null, error?: string): void {
     this.resolveCompletion({ exitCode, error });
   }
@@ -213,6 +217,7 @@ describe("RunService", () => {
     const adapter: CodexAdapter = {
       launch: async () => { throw new Error("app-server and fallback unavailable"); },
       stop: async () => undefined,
+      continueHumanInput: async () => { throw new Error("unavailable"); },
     };
     const { repository, service } = createService(adapter as FakeAdapter);
 

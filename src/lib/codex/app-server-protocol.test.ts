@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   beginAppServerRun,
   disposeAppServerChild,
+  normalizeAppServerHumanInputRequest,
   normalizeAppServerNotification,
   type AppServerTransport,
 } from "./app-server-adapter";
@@ -26,6 +27,7 @@ class FakeTransport implements AppServerTransport {
     if (message.method === "turn/start") {
       this.emit({ jsonrpc: "2.0", id: message.id, result: { turn: { id: "turn-1" } } });
     }
+    if (message.method === "turn/steer") this.emit({ jsonrpc: "2.0", id: message.id, result: {} });
     if (message.method === "turn/interrupt") this.emit({ jsonrpc: "2.0", id: message.id, result: {} });
   }
 
@@ -39,6 +41,37 @@ describe("app-server protocol", () => {
       method: "remoteControl/status/changed",
       params: { status: "connected" },
     })).toEqual({ type: "remoteControl/status/changed", params: { status: "connected" } });
+  });
+
+  it("normalizes server approval and question requests without trusting browser session fields", () => {
+    expect(normalizeAppServerHumanInputRequest({
+      jsonrpc: "2.0",
+      id: 42,
+      method: "item/tool/requestUserInput",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "item-1",
+        questions: [{ id: "choice", header: "Choice", question: "Continue?", options: [{ label: "Yes", description: "Proceed" }] }],
+      },
+    })).toEqual({
+      requestId: "42",
+      kind: "QUESTION",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      prompt: "Continue?",
+      options: ["Yes"],
+    });
+
+    expect(normalizeAppServerHumanInputRequest({
+      method: "item/commandExecution/requestApproval",
+      params: { threadId: "thread-1", turnId: "turn-1", itemId: "item-2", approvalId: "approval-2" },
+    })).toMatchObject({
+      requestId: "approval-2",
+      kind: "CONFIRMATION",
+      threadId: "thread-1",
+      turnId: "turn-1",
+    });
   });
 
   it("disposes a failed startup child before the exec fallback can launch", () => {
@@ -95,16 +128,39 @@ describe("app-server protocol", () => {
     });
   });
 
+  it("continues on the original thread, steering an active turn then starting a new turn when steering is rejected", async () => {
+    const transport = new FakeTransport();
+    const run = await beginAppServerRun(transport, { cwd: "C:\\fixture", prompt: "Do work" });
+
+    await expect(run.continue("Approved")).resolves.toEqual({ threadId: "thread-1", turnId: "turn-1", mode: "steer" });
+    expect(transport.messages.at(-1)).toMatchObject({
+      method: "turn/steer",
+      params: { threadId: "thread-1", expectedTurnId: "turn-1", input: [{ type: "text", text: "Approved" }] },
+    });
+
+    transport.failMethod = "turn/steer";
+    await expect(run.continue("Rejected")).resolves.toEqual({ threadId: "thread-1", turnId: "turn-1", mode: "start" });
+    expect(transport.messages.at(-1)).toMatchObject({
+      method: "turn/start",
+      params: { threadId: "thread-1", input: [{ type: "text", text: "Rejected" }] },
+    });
+  });
+
   it("uses exec fallback when app-server protocol startup rejects", async () => {
     const fallbackRequests: string[] = [];
     const adapter = new FallbackCodexAdapter(
-      { launch: async () => { throw new Error("initialize rejected"); }, stop: async () => undefined },
+      {
+        launch: async () => { throw new Error("initialize rejected"); },
+        stop: async () => undefined,
+        continueHumanInput: async () => { throw new Error("unavailable"); },
+      },
       {
         launch: async (request) => {
           fallbackRequests.push(request.runId);
           return { pid: 4, completed: Promise.resolve({ exitCode: 0 }) };
         },
         stop: async () => undefined,
+        continueHumanInput: async () => { throw new Error("unavailable"); },
       },
     );
     const events: string[] = [];

@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 
-import type { CodexAdapter, CodexRunCompletion, CodexRunHandle, CodexRunRequest } from "./codex-adapter";
+import type { CodexAdapter, CodexContinuation, CodexHumanInputResponse, CodexRunCompletion, CodexRunHandle, CodexRunRequest } from "./codex-adapter";
 
 /** Uses Codex's newline-delimited JSON mode when app-server cannot start. */
 export class ExecFallbackAdapter implements CodexAdapter {
@@ -54,6 +54,10 @@ export class ExecFallbackAdapter implements CodexAdapter {
     if (!child) throw new Error(`Run ${runId} is not active`);
     child.kill();
   }
+
+  async continueHumanInput(input: CodexHumanInputResponse): Promise<CodexContinuation> {
+    throw new Error(`Codex exec fallback cannot continue human input for run ${input.runId}; restart the task to recover.`);
+  }
 }
 
 /** Chooses app-server first, with a bounded startup failure falling back to `codex exec --json`. */
@@ -85,5 +89,11 @@ export class FallbackCodexAdapter implements CodexAdapter {
     const adapter = this.active.get(runId);
     if (!adapter) throw new Error(`Run ${runId} is not active`);
     await adapter.stop(runId);
+  }
+
+  async continueHumanInput(input: CodexHumanInputResponse): Promise<CodexContinuation> {
+    const adapter = this.active.get(input.runId);
+    if (!adapter) throw new Error(`Run ${input.runId} has no live Codex connection; restart the task to recover.`);
+    return adapter.continueHumanInput(input);
   }
 }

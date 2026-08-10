@@ -1,4 +1,4 @@
-import type { CodexAdapter, CodexRunRequest } from "../codex/codex-adapter";
+import type { CodexAdapter, CodexContinuation, CodexHumanInputResponse, CodexRunRequest } from "../codex/codex-adapter";
 import { AppServerAdapter } from "../codex/app-server-adapter";
 import { ExecFallbackAdapter, FallbackCodexAdapter } from "../codex/exec-fallback-adapter";
 import { GitService } from "../services/git-service";
@@ -32,6 +32,11 @@ class ControlledE2eAdapter implements CodexAdapter {
 
   async stop(runId: string): Promise<void> {
     this.completions.get(runId)?.({ exitCode: 0 });
+  }
+
+  async continueHumanInput(input: CodexHumanInputResponse): Promise<CodexContinuation> {
+    if (!this.completions.has(input.runId)) throw new Error(`Run ${input.runId} is not active`);
+    return { threadId: "e2e-thread", turnId: "e2e-turn", mode: "steer" };
   }
 }
 
