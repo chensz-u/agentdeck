@@ -9,7 +9,7 @@ export default defineConfig({
   testDir: "./e2e",
   webServer: {
     command: "npm run dev",
-    env: { AGENTDECK_DATA_PATH: e2eDataPath, AGENTDECK_E2E_STUB: "1" },
+    env: { AGENTDECK_DATA_PATH: e2eDataPath, AGENTDECK_E2E_STUB: "1", AGENTDECK_E2E_ASYNC_INPUT: "1" },
     url: "http://127.0.0.1:3000",
     reuseExistingServer: false,
   },

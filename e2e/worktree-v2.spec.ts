@@ -30,6 +30,7 @@ test("runs an isolated worktree through human input, review, lifecycle, and safe
     await page.getByRole("link", { name: "Isolated V2 flow" }).click();
 
     await page.getByRole("button", { name: "Run task" }).click();
+    await expect(page.getByRole("heading", { name: "Human input" })).toBeVisible();
     await expect(page.getByText("AWAITING INPUT", { exact: true })).toBeVisible();
     await page.getByRole("button", { name: "Stop run" }).click();
     await expect(page.getByText("CANCELLED", { exact: true })).toBeVisible();

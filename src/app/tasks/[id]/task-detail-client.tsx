@@ -44,7 +44,7 @@ export default function TaskDetailClient({ taskId }: { taskId: string }) {
     const receive = (message: MessageEvent<string>) => {
       const event = JSON.parse(message.data) as ActivityEvent;
       setEvents((current) => current.some((item) => item.sequence === event.sequence) ? current : [...current, event]);
-      if (event.type === "run/finished") void load();
+      if (event.type === "run/finished" || event.type === "human-input/requested") void load();
     };
     source.onmessage = receive;
     return () => source.close();

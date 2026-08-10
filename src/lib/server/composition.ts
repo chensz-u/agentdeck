@@ -43,14 +43,17 @@ class ControlledE2eAdapter implements CodexAdapter {
     if (request.cwd.includes(".agentdeck")) {
       this.isolatedRuns.add(request.runId);
       this.runCwds.set(request.runId, request.cwd);
-      await request.onEvent({ type: "human-input/requested", params: {
+      const humanInputRequest = { type: "human-input/requested" as const, params: {
         requestId: `e2e-input-${request.runId}`, rpcId: `e2e-input-${request.runId}`, kind: "QUESTION",
         threadId: `e2e-thread-${request.runId}`, turnId: `e2e-turn-${request.runId}`, prompt: "Choose the controlled test response.",
         questionIds: ["approach", "scope"], questions: [
           { id: "approach", header: "Approach", question: "Which approach should the task take?", options: ["Contained"] },
           { id: "scope", header: "Scope", question: "What scope should the task use?", options: ["Only this task"] },
         ],
-      } });
+      } };
+      if (process.env.AGENTDECK_E2E_ASYNC_INPUT === "1") {
+        setTimeout(() => { void request.onEvent(humanInputRequest); }, 200);
+      } else await request.onEvent(humanInputRequest);
     } else if (this.launches > 1) setTimeout(() => this.completions.get(request.runId)?.({ exitCode: 0 }), 20);
     return { pid: 0, completed };
   }
