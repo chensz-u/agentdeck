@@ -16,6 +16,7 @@ export interface RunLifecycleRepository {
     runId: string,
     update: Partial<Pick<AgentRun, "pid" | "status" | "exitCode" | "error" | "finishedAt">>,
   ): Promise<void>;
+  updateRunSession?(runId: string, update: Partial<Pick<AgentRun, "threadId" | "turnId" | "inputState">>): Promise<void>;
   saveDiff(runId: string, changedPaths: string[], diff: string): Promise<void>;
 }
 
@@ -75,6 +76,11 @@ export class RunService {
         runId: run.id,
         prompt: context.task.prompt,
         cwd: context.project.path,
+        onSession: async (session) => {
+          run.threadId = session.threadId;
+          run.turnId = session.turnId;
+          await this.options.repository.updateRunSession?.(run.id, session);
+        },
         onEvent: async (event) => {
           if (event.type === "human-input/requested") {
             await this.options.humanInput?.recordRequest({
@@ -88,6 +94,11 @@ export class RunService {
       });
       run.pid = handle.pid;
       await this.options.repository.updateRun(run.id, { pid: handle.pid });
+      if (handle.threadId || handle.turnId) {
+        run.threadId = handle.threadId ?? run.threadId ?? null;
+        run.turnId = handle.turnId ?? run.turnId ?? null;
+        await this.options.repository.updateRunSession?.(run.id, { threadId: run.threadId, turnId: run.turnId });
+      }
       const active: ActiveRun = {
         ...context,
         cancelled: false,
@@ -111,8 +122,8 @@ export class RunService {
   async stop(runId: string): Promise<void> {
     const active = this.active.get(runId);
     if (!active) throw new Error(`Run ${runId} is not active`);
-    await this.options.humanInput?.markTerminal(runId);
     active.cancelled = true;
+    await this.options.humanInput?.markTerminal(runId);
     await this.options.events.append(runId, { type: "run/cancelling", params: {} });
     await this.options.adapter.stop(runId);
   }

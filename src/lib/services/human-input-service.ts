@@ -38,7 +38,13 @@ export class HumanInputService {
         runId: input.runId,
         action: HumanInputAction.REQUEST,
         requestId: input.request.requestId,
-        payload: { kind: input.request.kind, questionIds: input.request.questionIds ?? [] },
+        payload: {
+          kind: input.request.kind,
+          threadId: input.request.threadId,
+          turnId: input.request.turnId,
+          questionIds: input.request.questionIds ?? [],
+          permissions: input.request.permissions ?? {},
+        },
         deliveryStatus: HumanInputDeliveryStatus.PENDING,
         deliveryError: null,
       });
@@ -97,18 +103,19 @@ export class HumanInputService {
     if (input.action !== HumanInputAction.TEXT && input.text !== undefined) throw new Error("Only text input may include text");
   }
 
-  private requestKind(audit: HumanInputAuditEntry): "CONFIRMATION" | "QUESTION" {
+  private requestKind(audit: HumanInputAuditEntry): "CONFIRMATION" | "QUESTION" | "PERMISSIONS" {
     if (!this.isRequestPayload(audit.payload)) throw new Error(`Human input request ${audit.requestId} is not pending`);
     return audit.payload.kind;
   }
 
-  private isRequestPayload(payload: unknown): payload is { kind: "CONFIRMATION" | "QUESTION"; questionIds: string[] } {
-    return typeof payload === "object" && payload !== null && !Array.isArray(payload)
-      && ((payload as { kind?: unknown }).kind === "CONFIRMATION" || (payload as { kind?: unknown }).kind === "QUESTION");
+  private isRequestPayload(payload: unknown): payload is { kind: "CONFIRMATION" | "QUESTION" | "PERMISSIONS"; questionIds: string[] } {
+    if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return false;
+    const kind = (payload as { kind?: unknown }).kind;
+    return kind === "CONFIRMATION" || kind === "QUESTION" || kind === "PERMISSIONS";
   }
 
-  private validateActionForRequest(kind: "CONFIRMATION" | "QUESTION", action: HumanInputAction): void {
-    if (kind === "CONFIRMATION" && action !== HumanInputAction.APPROVE && action !== HumanInputAction.REJECT) throw new Error("Confirmation request requires approve or reject");
+  private validateActionForRequest(kind: "CONFIRMATION" | "QUESTION" | "PERMISSIONS", action: HumanInputAction): void {
+    if ((kind === "CONFIRMATION" || kind === "PERMISSIONS") && action !== HumanInputAction.APPROVE && action !== HumanInputAction.REJECT) throw new Error(`${kind === "PERMISSIONS" ? "Permission" : "Confirmation"} request requires approve or reject`);
     if (kind === "QUESTION" && action !== HumanInputAction.TEXT) throw new Error("Question request requires text");
   }
 

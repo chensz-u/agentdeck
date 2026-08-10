@@ -28,17 +28,26 @@ export function normalizeAppServerNotification(message: unknown): CodexEvent | n
 export type AppServerHumanInputRequest = {
   requestId: string;
   rpcId: string | number;
-  kind: "CONFIRMATION" | "QUESTION";
+  kind: "CONFIRMATION" | "QUESTION" | "PERMISSIONS";
   threadId: string;
   turnId: string;
   prompt: string;
   questionIds?: string[];
   options?: string[];
+  permissions?: JsonRecord;
 };
 
 function readSession(params: JsonRecord): { threadId: string; turnId: string } | null {
   return typeof params.threadId === "string" && typeof params.turnId === "string"
     ? { threadId: params.threadId, turnId: params.turnId }
+    : null;
+}
+
+function sessionFromAppServerMessage(message: unknown): { threadId: string; turnId: string } | null {
+  if (!isRecord(message) || message.method !== "turn/started" || !isRecord(message.params)) return null;
+  const turn = message.params.turn;
+  return typeof message.params.threadId === "string" && isRecord(turn) && typeof turn.id === "string"
+    ? { threadId: message.params.threadId, turnId: turn.id }
     : null;
 }
 
@@ -57,7 +66,10 @@ export function normalizeAppServerHumanInputRequest(message: unknown): AppServer
       : []);
     return { ...session, requestId, rpcId: message.id, kind: "QUESTION", prompt: questions.map((question) => question.question as string).join("\n"), questionIds: questions.map((question) => question.id as string), ...(options.length ? { options } : {}) };
   }
-  if (["item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval"].includes(message.method)) {
+  if (message.method === "item/permissions/requestApproval" && isRecord(message.params.permissions)) {
+    return { ...session, requestId, rpcId: message.id, kind: "PERMISSIONS", prompt: "Codex requests additional permissions.", permissions: message.params.permissions };
+  }
+  if (["item/commandExecution/requestApproval", "item/fileChange/requestApproval"].includes(message.method)) {
     return { ...session, requestId, rpcId: message.id, kind: "CONFIRMATION", prompt: "Codex requests approval to continue." };
   }
   return null;
@@ -90,6 +102,8 @@ export type AppServerRun = {
   completed: Promise<CodexRunCompletion>;
   interrupt(): Promise<void>;
   respondToHumanInput(request: AppServerHumanInputRequest, response: Omit<CodexHumanInputResponse, "runId" | "requestId">): Promise<void>;
+  abortHumanInput(error: Error): void;
+  session(): { threadId: string; turnId: string };
 };
 
 /** Performs the protocol handshake; launch only succeeds after `turn/start` responds. */
@@ -99,6 +113,7 @@ export async function beginAppServerRun(
 ): Promise<AppServerRun> {
   let nextId = 1;
   const pending = new Map<number, { resolve(value: unknown): void; reject(error: Error): void }>();
+  const pendingServerRequests = new Map<string, { threadId: string; resolve(): void; reject(error: Error): void }>();
   let threadId = "";
   let turnId = "";
   let resolveCompletion!: (result: CodexRunCompletion) => void;
@@ -106,7 +121,17 @@ export async function beginAppServerRun(
 
   transport.onMessage((message) => {
     if (!isRecord(message)) return;
-    if (typeof message.id === "number") {
+    if (message.method === "serverRequest/resolved" && isRecord(message.params)
+      && (typeof message.params.requestId === "string" || typeof message.params.requestId === "number")
+      && typeof message.params.threadId === "string") {
+      const waiter = pendingServerRequests.get(String(message.params.requestId));
+      if (waiter && waiter.threadId === message.params.threadId) {
+        pendingServerRequests.delete(String(message.params.requestId));
+        waiter.resolve();
+      }
+      return;
+    }
+    if (typeof message.id === "number" && ("result" in message || "error" in message)) {
       const request = pending.get(message.id);
       if (!request) return;
       pending.delete(message.id);
@@ -118,6 +143,8 @@ export async function beginAppServerRun(
     const turn = message.params.turn;
     if (!isRecord(turn) || message.params.threadId !== threadId) return;
     const status = turn.status;
+    for (const waiter of pendingServerRequests.values()) waiter.reject(new Error("Codex turn completed before the human-input request was resolved"));
+    pendingServerRequests.clear();
     resolveCompletion(status === "completed" ? { exitCode: 0 } : {
       exitCode: 1,
       error: isRecord(turn.error) && typeof turn.error.message === "string"
@@ -132,6 +159,7 @@ export async function beginAppServerRun(
     transport.send({ jsonrpc: "2.0", id, method, params });
   });
   await request("initialize", { clientInfo: { name: "agentdeck", version: "0.1.0" } });
+  transport.send({ jsonrpc: "2.0", method: "initialized", params: {} });
   const threadResponse = await request("thread/start", { cwd: input.cwd });
   const thread = isRecord(threadResponse) && isRecord(threadResponse.thread) ? threadResponse.thread : undefined;
   if (!thread || typeof thread.id !== "string") throw new Error("Codex app-server did not return a thread id");
@@ -150,14 +178,30 @@ export async function beginAppServerRun(
     respondToHumanInput: async (inputRequest, response) => {
       if (inputRequest.kind === "CONFIRMATION") {
         if (response.action !== "APPROVE" && response.action !== "REJECT") throw new Error("Confirmation requests require approve or reject");
-        transport.send({ jsonrpc: "2.0", id: inputRequest.rpcId, result: { decision: response.action === "APPROVE" ? "accept" : "decline" } });
-        return;
+        return await respondToServerRequest(inputRequest, { decision: response.action === "APPROVE" ? "accept" : "decline" });
+      }
+      if (inputRequest.kind === "PERMISSIONS") {
+        if (response.action !== "APPROVE" && response.action !== "REJECT") throw new Error("Permission requests require approve or reject");
+        return await respondToServerRequest(inputRequest, { permissions: response.action === "APPROVE" ? inputRequest.permissions ?? {} : {} });
       }
       if (response.action !== "TEXT" || !inputRequest.questionIds?.length) throw new Error("Question requests require text");
       const answers = Object.fromEntries(inputRequest.questionIds.map((questionId) => [questionId, { answers: [response.text] }]));
-      transport.send({ jsonrpc: "2.0", id: inputRequest.rpcId, result: { answers } });
+      await respondToServerRequest(inputRequest, { answers });
     },
+    abortHumanInput: (error) => {
+      for (const waiter of pendingServerRequests.values()) waiter.reject(error);
+      pendingServerRequests.clear();
+    },
+    session: () => ({ threadId, turnId }),
   };
+
+  function respondToServerRequest(inputRequest: AppServerHumanInputRequest, result: JsonRecord): Promise<void> {
+    if (pendingServerRequests.has(inputRequest.requestId)) return Promise.reject(new Error(`Human input request ${inputRequest.requestId} is already being delivered`));
+    return new Promise((resolve, reject) => {
+      pendingServerRequests.set(inputRequest.requestId, { threadId: inputRequest.threadId, resolve, reject });
+      transport.send({ jsonrpc: "2.0", id: inputRequest.rpcId, result });
+    });
+  }
 }
 
 type AppServerAdapterOptions = { command?: string; startupTimeoutMs?: number };
@@ -193,6 +237,8 @@ export class AppServerAdapter implements CodexAdapter {
         try {
           const message = JSON.parse(line);
           receive?.(message);
+          const session = sessionFromAppServerMessage(message);
+          if (session) void Promise.resolve(request.onSession?.(session));
           const inputRequest = normalizeAppServerHumanInputRequest(message);
           if (inputRequest) {
             pendingInputs.set(inputRequest.requestId, inputRequest);
@@ -230,9 +276,10 @@ export class AppServerAdapter implements CodexAdapter {
         pendingInputs.delete(input.requestId);
       },
     });
+    processExit.then((result) => protocol.abortHumanInput(new Error(result.error ?? "Codex app-server exited before the human-input request resolved"))).catch(() => undefined);
     const completed = Promise.race([protocol.completed, processExit]);
     completed.finally(() => { this.processes.delete(request.runId); if (!child.killed) child.kill(); }).catch(() => undefined);
-    return { pid: child.pid ?? null, completed };
+    return { pid: child.pid ?? null, completed, ...protocol.session() };
   }
 
   async stop(runId: string): Promise<void> {

@@ -41,6 +41,7 @@ function createService() {
 
 const confirmation = { requestId: "server-1", rpcId: "server-1", kind: "CONFIRMATION" as const, threadId: "thread-1", turnId: "turn-1", prompt: "Approve?" };
 const question = { requestId: "server-2", rpcId: "server-2", kind: "QUESTION" as const, threadId: "thread-1", turnId: "turn-1", prompt: "Choice?", questionIds: ["choice"] };
+const permissions = { requestId: "server-3", rpcId: "server-3", kind: "PERMISSIONS" as const, threadId: "thread-1", turnId: "turn-1", prompt: "Permissions?", permissions: { network: { allowedDomains: ["example.com"] } } };
 
 describe("HumanInputService", () => {
   it("persists a server-originated pending request and delivers the matching approval once", async () => {
@@ -49,7 +50,7 @@ describe("HumanInputService", () => {
 
     await service.submit({ taskId: "task-1", runId: "run-1", requestId: "server-1", action: HumanInputAction.APPROVE });
 
-    expect(repository.entries).toMatchObject([{ action: HumanInputAction.REQUEST, requestId: "server-1", deliveryStatus: HumanInputDeliveryStatus.DELIVERED }]);
+    expect(repository.entries).toMatchObject([{ action: HumanInputAction.REQUEST, requestId: "server-1", payload: { threadId: "thread-1", turnId: "turn-1" }, deliveryStatus: HumanInputDeliveryStatus.DELIVERED }]);
     expect(adapter.inputs).toEqual([{ runId: "run-1", requestId: "server-1", action: HumanInputAction.APPROVE, text: "" }]);
     expect(repository.task.status).toBe(TaskStatus.RUNNING);
   });
@@ -60,6 +61,16 @@ describe("HumanInputService", () => {
 
     await expect(service.submit({ taskId: "task-1", runId: "run-1", requestId: "forged", action: HumanInputAction.TEXT, text: "yes" })).rejects.toThrow("not pending");
     await expect(service.submit({ taskId: "task-1", runId: "run-1", requestId: "server-2", action: HumanInputAction.APPROVE })).rejects.toThrow("requires text");
+  });
+
+  it("binds permission approval to the persisted server permission profile", async () => {
+    const { repository, adapter, service } = createService();
+    await service.recordRequest({ taskId: "task-1", runId: "run-1", request: permissions });
+
+    await service.submit({ taskId: "task-1", runId: "run-1", requestId: "server-3", action: HumanInputAction.APPROVE });
+
+    expect(repository.entries[0]).toMatchObject({ payload: { kind: "PERMISSIONS", permissions: permissions.permissions } });
+    expect(adapter.inputs).toEqual([{ runId: "run-1", requestId: "server-3", action: HumanInputAction.APPROVE, text: "" }]);
   });
 
   it("retries an exact request id after a failed delivery but never redelivers a delivered response", async () => {

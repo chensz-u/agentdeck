@@ -8,7 +8,7 @@ import {
   type Task,
 } from "../domain/types";
 import type { CodexAdapter, CodexHumanInputResponse, CodexRunRequest } from "../codex/codex-adapter";
-import { RunService, type RunLifecycleRepository } from "./run-service";
+import { RunService, type RunHumanInputLifecycle, type RunLifecycleRepository } from "./run-service";
 
 function task(overrides: Partial<Task> = {}): Task {
   return {
@@ -93,6 +93,12 @@ class InMemoryRunRepository implements RunLifecycleRepository {
     Object.assign(found, update);
   }
 
+  async updateRunSession(id: string, update: Partial<Pick<AgentRun, "threadId" | "turnId" | "inputState">>): Promise<void> {
+    const found = this.runs.find((candidate) => candidate.id === id);
+    if (!found) throw new Error("Run not found");
+    Object.assign(found, update);
+  }
+
   async saveDiff(runId: string, changedPaths: string[], diff: string): Promise<void> {
     this.capturedDiffs.set(runId, { changedPaths, diff });
   }
@@ -113,6 +119,29 @@ class FakeHumanInput {
   async markTerminal(runId: string): Promise<void> { this.terminals.push(runId); }
 }
 
+class BlockingHumanInput implements RunHumanInputLifecycle {
+  readonly terminals: string[] = [];
+  private readonly releases: Array<() => void> = [];
+  private readonly markers: Array<() => void> = [];
+
+  async recordRequest(): Promise<void> {}
+
+  markTerminal(runId: string): Promise<void> {
+    this.terminals.push(runId);
+    this.markers.shift()?.();
+    return new Promise((resolve) => this.releases.push(resolve));
+  }
+
+  waitForTerminals(count: number): Promise<void> {
+    if (this.terminals.length >= count) return Promise.resolve();
+    return new Promise((resolve) => this.markers.push(resolve));
+  }
+
+  releaseNext(): void {
+    this.releases.shift()?.();
+  }
+}
+
 class FakeAdapter implements CodexAdapter {
   requests: CodexRunRequest[] = [];
   stopped: string[] = [];
@@ -122,6 +151,8 @@ class FakeAdapter implements CodexAdapter {
     this.requests.push(request);
     return {
       pid: 4321,
+      threadId: "thread-1",
+      turnId: "turn-1",
       completed: new Promise<{ exitCode: number | null; error?: string }>((resolve) => {
         this.resolveCompletion = resolve;
       }),
@@ -141,14 +172,14 @@ class FakeAdapter implements CodexAdapter {
   }
 }
 
-function createService(adapter = new FakeAdapter()) {
+function createService(adapter = new FakeAdapter(), humanInput?: RunHumanInputLifecycle) {
   const repository = new InMemoryRunRepository();
   const events = new MemoryEvents();
   const git = {
     getChangedPaths: async () => ["note.txt"],
     getDiff: async () => "diff --git a/note.txt b/note.txt",
   };
-  return { adapter, repository, events, service: new RunService({ repository, adapter, events, git }) };
+  return { adapter, repository, events, service: new RunService({ repository, adapter, events, git, humanInput }) };
 }
 
 describe("RunService", () => {
@@ -157,8 +188,9 @@ describe("RunService", () => {
 
     const run = await service.launch("task-1");
     await adapter.requests[0].onEvent({ type: "item/started", params: { item: "work" } });
+    await adapter.requests[0].onSession?.({ threadId: "thread-1", turnId: "turn-2" });
 
-    expect(run).toMatchObject({ taskId: "task-1", status: AgentRunStatus.RUNNING, pid: 4321 });
+    expect(run).toMatchObject({ taskId: "task-1", status: AgentRunStatus.RUNNING, pid: 4321, threadId: "thread-1", turnId: "turn-2" });
     expect(repository.tasks[0].status).toBe(TaskStatus.RUNNING);
     expect(events.events).toContainEqual({
       runId: run.id,
@@ -235,6 +267,25 @@ describe("RunService", () => {
     await service.waitForCompletion(run.id);
 
     expect(adapter.stopped).toEqual([run.id]);
+    expect(repository.tasks[0].status).toBe(TaskStatus.CANCELLED);
+    expect(repository.runs[0]).toMatchObject({ status: AgentRunStatus.CANCELLED });
+  });
+
+  it("lets stop win when process completion and terminal input cleanup race", async () => {
+    const humanInput = new BlockingHumanInput();
+    const { adapter, repository, service } = createService(new FakeAdapter(), humanInput);
+
+    const run = await service.launch("task-1");
+    adapter.complete(0);
+    await humanInput.waitForTerminals(1);
+    const stopping = service.stop(run.id);
+    await humanInput.waitForTerminals(2);
+
+    humanInput.releaseNext();
+    await service.waitForCompletion(run.id);
+    humanInput.releaseNext();
+    await stopping;
+
     expect(repository.tasks[0].status).toBe(TaskStatus.CANCELLED);
     expect(repository.runs[0]).toMatchObject({ status: AgentRunStatus.CANCELLED });
   });

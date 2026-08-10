@@ -6,6 +6,7 @@ export type CodexRunRequest = {
   prompt: string;
   cwd: string;
   onEvent(event: CodexEvent): Promise<void> | void;
+  onSession?(session: { threadId: string; turnId: string }): Promise<void> | void;
 };
 
 export type CodexRunCompletion = {
@@ -16,6 +17,8 @@ export type CodexRunCompletion = {
 export type CodexRunHandle = {
   pid: number | null;
   completed: Promise<CodexRunCompletion>;
+  threadId?: string;
+  turnId?: string;
 };
 
 export type CodexHumanInputResponse = {

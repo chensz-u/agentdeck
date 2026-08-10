@@ -101,6 +101,7 @@ describe("app-server protocol", () => {
 
     expect(transport.messages).toEqual([
       expect.objectContaining({ id: 1, method: "initialize", params: { clientInfo: { name: "agentdeck", version: "0.1.0" } } }),
+      expect.objectContaining({ jsonrpc: "2.0", method: "initialized", params: {} }),
       expect.objectContaining({ id: 2, method: "thread/start", params: { cwd: "C:\\fixture" } }),
       expect.objectContaining({ id: 3, method: "turn/start", params: {
         threadId: "thread-1", input: [{ type: "text", text: "Do work" }],
@@ -137,26 +138,82 @@ describe("app-server protocol", () => {
     const transport = new FakeTransport();
     const run = await beginAppServerRun(transport, { cwd: "C:\\fixture", prompt: "Do work" });
 
-    await run.respondToHumanInput({
+    expect(run.session()).toEqual({ threadId: "thread-1", turnId: "turn-1" });
+
+    const delivery = run.respondToHumanInput({
       requestId: "42", rpcId: 42, kind: "CONFIRMATION", threadId: "thread-1", turnId: "turn-1", prompt: "Approve?",
     }, { action: HumanInputAction.APPROVE, text: "" });
 
     expect(transport.messages.at(-1)).toMatchObject({
       jsonrpc: "2.0", id: 42, result: { decision: "accept" },
     });
+    transport.emit({ jsonrpc: "2.0", method: "serverRequest/resolved", params: { requestId: 42, threadId: "thread-1" } });
+    await delivery;
+  });
+
+  it("does not mark a server request delivered until its matching resolved notification arrives", async () => {
+    const transport = new FakeTransport();
+    const run = await beginAppServerRun(transport, { cwd: "C:\\fixture", prompt: "Do work" });
+    let settled = false;
+    const delivery = run.respondToHumanInput({
+      requestId: "42", rpcId: 42, kind: "CONFIRMATION", threadId: "thread-1", turnId: "turn-1", prompt: "Approve?",
+    }, { action: HumanInputAction.APPROVE, text: "" }).then(() => { settled = true; });
+
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    transport.emit({ jsonrpc: "2.0", method: "serverRequest/resolved", params: { requestId: 43, threadId: "thread-1" } });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    transport.emit({ jsonrpc: "2.0", method: "serverRequest/resolved", params: { requestId: 42, threadId: "thread-1" } });
+    await delivery;
+    expect(settled).toBe(true);
+  });
+
+  it("rejects an in-flight delivery when the app-server connection exits", async () => {
+    const transport = new FakeTransport();
+    const run = await beginAppServerRun(transport, { cwd: "C:\\fixture", prompt: "Do work" });
+    const delivery = run.respondToHumanInput({
+      requestId: "46", rpcId: 46, kind: "CONFIRMATION", threadId: "thread-1", turnId: "turn-1", prompt: "Approve?",
+    }, { action: HumanInputAction.APPROVE, text: "" });
+
+    run.abortHumanInput(new Error("app-server exited"));
+
+    await expect(delivery).rejects.toThrow("app-server exited");
   });
 
   it("answers a user-input request with its schema-shaped question answer map", async () => {
     const transport = new FakeTransport();
     const run = await beginAppServerRun(transport, { cwd: "C:\\fixture", prompt: "Do work" });
 
-    await run.respondToHumanInput({
+    const delivery = run.respondToHumanInput({
       requestId: "43", rpcId: "43", kind: "QUESTION", threadId: "thread-1", turnId: "turn-1", prompt: "Choice?", questionIds: ["choice"],
     }, { action: HumanInputAction.TEXT, text: "Yes" });
 
     expect(transport.messages.at(-1)).toMatchObject({
       jsonrpc: "2.0", id: "43", result: { answers: { choice: { answers: ["Yes"] } } },
     });
+    transport.emit({ jsonrpc: "2.0", method: "serverRequest/resolved", params: { requestId: "43", threadId: "thread-1" } });
+    await delivery;
+  });
+
+  it("persists the permission profile and returns only the granted permission subset", async () => {
+    const transport = new FakeTransport();
+    const run = await beginAppServerRun(transport, { cwd: "C:\\fixture", prompt: "Do work" });
+    const permissions = { network: { allowedDomains: ["example.com"] } };
+
+    const approved = run.respondToHumanInput({
+      requestId: "44", rpcId: 44, kind: "PERMISSIONS", threadId: "thread-1", turnId: "turn-1", prompt: "Allow network?", permissions,
+    }, { action: HumanInputAction.APPROVE, text: "" });
+    expect(transport.messages.at(-1)).toMatchObject({ jsonrpc: "2.0", id: 44, result: { permissions } });
+    transport.emit({ jsonrpc: "2.0", method: "serverRequest/resolved", params: { requestId: 44, threadId: "thread-1" } });
+    await approved;
+
+    const rejected = run.respondToHumanInput({
+      requestId: "45", rpcId: 45, kind: "PERMISSIONS", threadId: "thread-1", turnId: "turn-1", prompt: "Allow network?", permissions,
+    }, { action: HumanInputAction.REJECT, text: "" });
+    expect(transport.messages.at(-1)).toMatchObject({ jsonrpc: "2.0", id: 45, result: { permissions: {} } });
+    transport.emit({ jsonrpc: "2.0", method: "serverRequest/resolved", params: { requestId: 45, threadId: "thread-1" } });
+    await rejected;
   });
 
   it("uses exec fallback when app-server protocol startup rejects", async () => {

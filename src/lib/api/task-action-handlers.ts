@@ -1,14 +1,24 @@
 import { z } from "zod";
 
-import type { Task } from "../domain/types";
+import { HumanInputAction, type AgentRun, type Task } from "../domain/types";
+import type { HumanInputSubmission } from "../services/human-input-service";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
 export type RunTaskAction = { launch(taskId: string): Promise<unknown> };
 export type StopTaskAction = { stop(taskId: string, runId: string): Promise<void> };
 export type RetryTaskAction = { createRetryTask(taskId: string): Promise<Task> };
+export type HumanInputTaskAction = {
+  findLatestRun(taskId: string): Promise<AgentRun | null>;
+  submit(input: HumanInputSubmission): Promise<unknown>;
+};
 
 const stopSchema = z.object({ runId: z.string().trim().min(1) }).strict();
+const humanInputSchema = z.object({
+  requestId: z.string().trim().min(1),
+  action: z.enum([HumanInputAction.APPROVE, HumanInputAction.REJECT, HumanInputAction.TEXT]),
+  text: z.string().max(4_000).optional(),
+}).strict();
 
 export function createTaskRunRouteHandlers(service: RunTaskAction) {
   return {
@@ -62,6 +72,29 @@ export function createTaskRetryRouteHandlers(service: RetryTaskAction) {
           { error: error instanceof Error ? error.message : "Unable to retry task" },
           { status: 400 },
         );
+      }
+    },
+  };
+}
+
+export function createTaskHumanInputRouteHandlers(service: HumanInputTaskAction) {
+  return {
+    async POST(request: Request, context: RouteContext): Promise<Response> {
+      let body: unknown;
+      try {
+        body = await request.json();
+      } catch {
+        return Response.json({ error: "Invalid JSON body" }, { status: 400 });
+      }
+      const parsed = humanInputSchema.safeParse(body);
+      if (!parsed.success) return Response.json({ error: "Invalid human input payload" }, { status: 400 });
+      const { id: taskId } = await context.params;
+      const run = await service.findLatestRun(taskId);
+      if (!run) return Response.json({ error: "No run found for task" }, { status: 404 });
+      try {
+        return Response.json(await service.submit({ taskId, runId: run.id, ...parsed.data }));
+      } catch (error) {
+        return Response.json({ error: error instanceof Error ? error.message : "Unable to deliver human input" }, { status: 400 });
       }
     },
   };

@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { TaskStatus, type Task } from "../../../lib/domain/types";
+import { AgentRunStatus, HumanInputAction, TaskStatus, type Task } from "../../../lib/domain/types";
 import {
   createTaskRetryRouteHandlers,
+  createTaskHumanInputRouteHandlers,
   createTaskRunRouteHandlers,
   createTaskStopRouteHandlers,
 } from "../../../lib/api/task-action-handlers";
@@ -67,5 +68,46 @@ describe("task action routes", () => {
     expect(response.status).toBe(201);
     expect(await response.json()).toMatchObject({ id: "task-2", parentTaskId: "task-1" });
     expect(retried).toEqual(["task-1"]);
+  });
+
+  it("resolves the task's current run server-side and forwards only typed human input", async () => {
+    const submitted: unknown[] = [];
+    const handlers = createTaskHumanInputRouteHandlers({
+      findLatestRun: async () => ({ id: "run-1", taskId: "task-1", agent: "codex", status: AgentRunStatus.RUNNING, pid: 1, exitCode: null, error: null, logPath: null, startedAt: new Date(), finishedAt: null }),
+      submit: async (input) => { submitted.push(input); return { id: "audit-1" }; },
+    });
+
+    const response = await handlers.POST(new Request("http://localhost", {
+      method: "POST", body: JSON.stringify({ requestId: "server-1", action: HumanInputAction.APPROVE }),
+    }), context);
+
+    expect(response.status).toBe(200);
+    expect(submitted).toEqual([{ taskId: "task-1", runId: "run-1", requestId: "server-1", action: HumanInputAction.APPROVE }]);
+  });
+
+  it("rejects browser-supplied protocol identifiers on human input", async () => {
+    const handlers = createTaskHumanInputRouteHandlers({
+      findLatestRun: async () => null,
+      submit: async () => ({ id: "audit-1" }),
+    });
+
+    const response = await handlers.POST(new Request("http://localhost", {
+      method: "POST", body: JSON.stringify({ requestId: "server-1", action: HumanInputAction.APPROVE, threadId: "forged" }),
+    }), context);
+
+    expect(response.status).toBe(400);
+  });
+
+  it("rejects the server-only REQUEST audit action", async () => {
+    const handlers = createTaskHumanInputRouteHandlers({
+      findLatestRun: async () => null,
+      submit: async () => ({ id: "audit-1" }),
+    });
+
+    const response = await handlers.POST(new Request("http://localhost", {
+      method: "POST", body: JSON.stringify({ requestId: "server-1", action: HumanInputAction.REQUEST }),
+    }), context);
+
+    expect(response.status).toBe(400);
   });
 });
