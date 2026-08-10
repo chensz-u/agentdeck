@@ -12,7 +12,7 @@ export interface WorktreeRepository {
   findWorktreeByTaskId(taskId: string): Promise<Worktree | null>;
   /** This must atomically store the worktree and link it to its task. */
   createWorktree(input: Omit<Worktree, "id" | "createdAt">): Promise<Worktree>;
-  /** Atomically claims a READY worktree for cleanup. */
+  /** Atomically claims a retryable worktree for cleanup. */
   claimWorktreeCleanup(worktreeId: string, requestedAt: Date): Promise<Worktree>;
   updateWorktree(
     worktreeId: string,
@@ -103,11 +103,11 @@ export class WorktreeService {
     const projectPath = await this.requireRegisteredGitProject(project);
 
     this.assertManagedWorktree(projectPath, worktree);
-    if (worktree.status !== WorktreeStatus.READY) {
+    if (worktree.status !== WorktreeStatus.READY && worktree.status !== WorktreeStatus.CLEANUP_FAILED) {
       throw new Error(`Worktree ${worktree.id} is not READY for cleanup`);
     }
-    if (![TaskStatus.REVIEW, TaskStatus.MERGE_READY, TaskStatus.DONE].includes(task.status)) {
-      throw new Error("Cleanup is only allowed for REVIEW, MERGE_READY, or DONE tasks");
+    if (![TaskStatus.REVIEW, TaskStatus.MERGE_READY, TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.WORKTREE_FAILED].includes(task.status)) {
+      throw new Error("Cleanup is only allowed for REVIEW, MERGE_READY, DONE, FAILED, CANCELLED, or WORKTREE_FAILED tasks");
     }
     const claimed = await this.options.repository.claimWorktreeCleanup(worktree.id, this.now());
 

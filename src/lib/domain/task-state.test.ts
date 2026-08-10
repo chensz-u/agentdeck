@@ -20,6 +20,9 @@ describe("task state transitions", () => {
     expect(canTransitionTask(TaskStatus.AWAITING_INPUT, TaskStatus.RUNNING)).toBe(true);
     expect(canTransitionTask(TaskStatus.REVIEW, TaskStatus.MERGE_READY)).toBe(true);
     expect(canTransitionTask(TaskStatus.REVIEW, TaskStatus.CLEANED)).toBe(true);
+    expect(canTransitionTask(TaskStatus.FAILED, TaskStatus.CLEANED)).toBe(true);
+    expect(canTransitionTask(TaskStatus.CANCELLED, TaskStatus.CLEANED)).toBe(true);
+    expect(canTransitionTask(TaskStatus.WORKTREE_FAILED, TaskStatus.CLEANED)).toBe(true);
     expect(canTransitionTask(TaskStatus.MERGE_READY, TaskStatus.CLEANED)).toBe(true);
     expect(canTransitionTask(TaskStatus.MERGE_READY, TaskStatus.DONE)).toBe(true);
   });

@@ -77,7 +77,7 @@ class MemoryWorktreeRepository implements WorktreeRepository {
 
   async claimWorktreeCleanup(id: string, requestedAt: Date): Promise<Worktree> {
     if (!this.worktree || this.worktree.id !== id) throw new Error("Worktree not found");
-    if (this.worktree.status !== WorktreeStatus.READY) throw new Error(`Worktree ${id} is not READY for cleanup`);
+    if (this.worktree.status !== WorktreeStatus.READY && this.worktree.status !== WorktreeStatus.CLEANUP_FAILED) throw new Error(`Worktree ${id} is not READY for cleanup`);
     this.worktree.status = WorktreeStatus.CLEANING;
     this.worktree.cleanupRequestedAt = requestedAt;
     this.worktree.cleanupError = null;
@@ -221,6 +221,39 @@ describe("WorktreeService", () => {
     expect(() => git(path, ["rev-parse", "--verify", worktree.taskBranch])).toThrow();
   });
 
+  it.each([TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.WORKTREE_FAILED])(
+    "cleans a terminal isolated %s task",
+    async (status) => {
+      const path = createGitFixture();
+      fixtures.push(path);
+      const repository = new MemoryWorktreeRepository(fixtureTask({ status }), fixtureProject(path));
+      const service = new WorktreeService({ repository });
+      const worktree = await service.create("task-1");
+
+      await service.cleanup("task-1");
+
+      expect(existsSync(worktree.worktreePath)).toBe(false);
+      expect(repository.task.status).toBe(TaskStatus.CLEANED);
+    },
+  );
+
+  it("retries a dirty cleanup after the worktree is made clean", async () => {
+    const path = createGitFixture();
+    fixtures.push(path);
+    const repository = new MemoryWorktreeRepository(fixtureTask({ status: TaskStatus.CANCELLED }), fixtureProject(path));
+    const service = new WorktreeService({ repository });
+    const worktree = await service.create("task-1");
+    writeFileSync(join(worktree.worktreePath, "README.md"), "dirty\n");
+
+    await expect(service.cleanup("task-1")).rejects.toThrow("uncommitted changes");
+    git(worktree.worktreePath, ["checkout", "--", "README.md"]);
+
+    await service.cleanup("task-1");
+
+    expect(repository.worktree).toMatchObject({ status: WorktreeStatus.CLEANED });
+    expect(repository.task.status).toBe(TaskStatus.CLEANED);
+  });
+
   it("rejects a tampered persisted task branch before deleting the managed worktree", async () => {
     const path = createGitFixture();
     fixtures.push(path);
@@ -274,7 +307,7 @@ describe("WorktreeService", () => {
     const service = new WorktreeService({ repository });
     const worktree = await service.create("task-1");
 
-    await expect(service.cleanup("task-1")).rejects.toThrow("Cleanup is only allowed for REVIEW, MERGE_READY, or DONE tasks");
+    await expect(service.cleanup("task-1")).rejects.toThrow("Cleanup is only allowed for REVIEW, MERGE_READY, DONE, FAILED, CANCELLED, or WORKTREE_FAILED tasks");
     expect(existsSync(worktree.worktreePath)).toBe(true);
   });
 });

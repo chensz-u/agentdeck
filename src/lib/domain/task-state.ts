@@ -23,9 +23,9 @@ const legalTransitions: Readonly<Record<TaskStatus, readonly TaskStatus[]>> = {
   [TaskStatus.MERGE_READY]: [TaskStatus.CLEANED, TaskStatus.DONE],
   [TaskStatus.DONE]: [TaskStatus.CLEANED],
   [TaskStatus.CLEANED]: [],
-  [TaskStatus.FAILED]: [],
-  [TaskStatus.WORKTREE_FAILED]: [],
-  [TaskStatus.CANCELLED]: [],
+  [TaskStatus.FAILED]: [TaskStatus.CLEANED],
+  [TaskStatus.WORKTREE_FAILED]: [TaskStatus.CLEANED],
+  [TaskStatus.CANCELLED]: [TaskStatus.CLEANED],
 };
 
 export function canTransitionTask(from: TaskStatus, to: TaskStatus): boolean {

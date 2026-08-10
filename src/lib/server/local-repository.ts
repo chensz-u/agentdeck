@@ -1,6 +1,7 @@
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { mkdir, rename, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 
 import {
@@ -329,8 +330,8 @@ export class LocalRepository implements ProjectStore, TaskApiStore, RunLifecycle
     return this.mutate(() => {
       const worktree = this.data.worktrees.find((candidate) => candidate.id === worktreeId);
       if (!worktree) throw new Error(`Worktree ${worktreeId} was not found`);
-      if (worktree.status !== WorktreeStatus.READY) {
-        throw new Error(`Worktree ${worktreeId} is not READY for cleanup`);
+      if (worktree.status !== WorktreeStatus.READY && worktree.status !== WorktreeStatus.CLEANUP_FAILED) {
+        throw new Error(`Worktree ${worktreeId} is not ready for cleanup`);
       }
       worktree.status = WorktreeStatus.CLEANING;
       worktree.cleanupRequestedAt = requestedAt.toISOString();
@@ -472,6 +473,33 @@ export class LocalRepository implements ProjectStore, TaskApiStore, RunLifecycle
       task.updatedAt = now;
       changed = true;
     }
+    return this.reconcileInterruptedCleanups(data) || changed;
+  }
+
+  private reconcileInterruptedCleanups(data: StoredData): boolean {
+    let changed = false;
+    for (const worktree of data.worktrees) {
+      if (worktree.status !== WorktreeStatus.CLEANING) continue;
+      const project = data.projects.find((candidate) => candidate.id === worktree.projectId);
+      const expectedPath = project ? resolve(project.path, ".agentdeck", "worktrees", `task-${safeId(worktree.taskId)}`) : null;
+      const managedRecord = project !== undefined && expectedPath !== null
+        ? resolve(worktree.projectPath) === resolve(project.path)
+          && resolve(worktree.worktreePath) === expectedPath
+          && worktree.taskBranch === `agentdeck/task-${safeId(worktree.taskId)}`
+        : false;
+      const worktreePresent = managedRecord && expectedPath !== null && isGitWorktree(expectedPath);
+      const branchPresent = managedRecord && project !== undefined && branchExists(project.path, worktree.taskBranch);
+      if (worktreePresent && branchPresent) {
+        worktree.status = WorktreeStatus.READY;
+        worktree.cleanupError = null;
+      } else {
+        worktree.status = WorktreeStatus.CLEANUP_FAILED;
+        worktree.cleanupError = !managedRecord
+          ? "Interrupted cleanup recovery could not verify managed worktree metadata"
+          : `Interrupted cleanup recovery found ${[!worktreePresent && "missing worktree", !branchPresent && "missing branch"].filter(Boolean).join(" and ")}`;
+      }
+      changed = true;
+    }
     return changed;
   }
 
@@ -494,5 +522,27 @@ export class LocalRepository implements ProjectStore, TaskApiStore, RunLifecycle
     this.writeQueue = write.catch(() => undefined);
     await write;
     return result;
+  }
+}
+
+function safeId(value: string): string {
+  return value.trim().replace(/[^A-Za-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").toLowerCase();
+}
+
+function isGitWorktree(path: string): boolean {
+  if (!existsSync(path)) return false;
+  try {
+    return resolve(execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd: path, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim()) === resolve(path);
+  } catch {
+    return false;
+  }
+}
+
+function branchExists(projectPath: string, branch: string): boolean {
+  try {
+    execFileSync("git", ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], { cwd: projectPath, stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
   }
 }

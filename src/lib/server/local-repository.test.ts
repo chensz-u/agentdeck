@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,9 +15,25 @@ import {
   WorktreeStatus,
 } from "../domain/types";
 import { TaskService } from "../services/task-service";
+import { WorktreeService } from "../services/worktree-service";
 import { LocalRepository } from "./local-repository";
 
 const temporaryDirectories: string[] = [];
+
+function git(cwd: string, args: string[]): string {
+  return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+}
+
+async function createGitFixture(): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), "agentdeck-recovery-"));
+  git(directory, ["init", "--quiet"]);
+  git(directory, ["config", "user.email", "test@example.com"]);
+  git(directory, ["config", "user.name", "Test User"]);
+  await writeFile(join(directory, "README.md"), "fixture\n");
+  git(directory, ["add", "README.md"]);
+  git(directory, ["commit", "--quiet", "-m", "initial"]);
+  return directory;
+}
 
 afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
@@ -261,6 +278,50 @@ describe("LocalRepository V2 persistence", () => {
     await expect(repository.findWorktreeByTaskId(task.id)).resolves.toMatchObject({
       status: WorktreeStatus.CLEANING,
       cleanupRequestedAt: new Date("2026-08-10T01:00:00.000Z"),
+    });
+  });
+
+  it("recovers an interrupted CLEANING worktree to READY and permits a safe retry", async () => {
+    const directory = await createGitFixture();
+    temporaryDirectories.push(directory);
+    const dataPath = join(directory, ".agentdeck", "data.json");
+    const worktreePath = join(directory, ".agentdeck", "worktrees", "task-task-1");
+    const taskBranch = "agentdeck/task-task-1";
+    git(directory, ["worktree", "add", "--quiet", "-b", taskBranch, worktreePath, "HEAD"]);
+    await writeFile(dataPath, JSON.stringify({
+      projects: [{ id: "project-1", name: "Fixture", path: directory, gitEnabled: true, gitRemote: null, gitBranch: "main", createdAt: "2026-08-10T00:00:00.000Z", updatedAt: "2026-08-10T00:00:00.000Z" }],
+      tasks: [{ id: "task-1", projectId: "project-1", parentTaskId: null, title: "Interrupted cleanup", prompt: "Clean", status: TaskStatus.CANCELLED, executionMode: ExecutionMode.ISOLATED_WORKTREE, worktreeId: "worktree-1", createdAt: "2026-08-10T00:00:00.000Z", updatedAt: "2026-08-10T00:00:00.000Z" }],
+      runs: [], diffs: {}, humanInputs: [],
+      worktrees: [{ id: "worktree-1", taskId: "task-1", projectId: "project-1", projectPath: directory, worktreePath, taskBranch, baselineBranch: "master", baselineSha: git(directory, ["rev-parse", "HEAD"]), createdAt: "2026-08-10T00:00:00.000Z", status: WorktreeStatus.CLEANING, error: null, cleanupRequestedAt: "2026-08-10T00:01:00.000Z", cleanedAt: null, cleanupError: null }],
+    }), "utf8");
+
+    const repository = new LocalRepository(dataPath);
+
+    await expect(repository.findWorktreeByTaskId("task-1")).resolves.toMatchObject({ status: WorktreeStatus.READY, cleanupError: null });
+    await new WorktreeService({ repository }).cleanup("task-1");
+    await expect(repository.findTask("task-1")).resolves.toMatchObject({ status: TaskStatus.CLEANED });
+  });
+
+  it("marks interrupted CLEANING metadata as retry-diagnosable when a managed resource is missing", async () => {
+    const directory = await createGitFixture();
+    temporaryDirectories.push(directory);
+    const dataPath = join(directory, ".agentdeck", "data.json");
+    const worktreePath = join(directory, ".agentdeck", "worktrees", "task-task-1");
+    const taskBranch = "agentdeck/task-task-1";
+    git(directory, ["worktree", "add", "--quiet", "-b", taskBranch, worktreePath, "HEAD"]);
+    git(directory, ["worktree", "remove", "--force", worktreePath]);
+    await writeFile(dataPath, JSON.stringify({
+      projects: [{ id: "project-1", name: "Fixture", path: directory, gitEnabled: true, gitRemote: null, gitBranch: "main", createdAt: "2026-08-10T00:00:00.000Z", updatedAt: "2026-08-10T00:00:00.000Z" }],
+      tasks: [{ id: "task-1", projectId: "project-1", parentTaskId: null, title: "Interrupted cleanup", prompt: "Clean", status: TaskStatus.CANCELLED, executionMode: ExecutionMode.ISOLATED_WORKTREE, worktreeId: "worktree-1", createdAt: "2026-08-10T00:00:00.000Z", updatedAt: "2026-08-10T00:00:00.000Z" }],
+      runs: [], diffs: {}, humanInputs: [],
+      worktrees: [{ id: "worktree-1", taskId: "task-1", projectId: "project-1", projectPath: directory, worktreePath, taskBranch, baselineBranch: "master", baselineSha: git(directory, ["rev-parse", "HEAD"]), createdAt: "2026-08-10T00:00:00.000Z", status: WorktreeStatus.CLEANING, error: null, cleanupRequestedAt: "2026-08-10T00:01:00.000Z", cleanedAt: null, cleanupError: null }],
+    }), "utf8");
+
+    const repository = new LocalRepository(dataPath);
+
+    await expect(repository.findWorktreeByTaskId("task-1")).resolves.toMatchObject({
+      status: WorktreeStatus.CLEANUP_FAILED,
+      cleanupError: expect.stringContaining("missing worktree"),
     });
   });
 
