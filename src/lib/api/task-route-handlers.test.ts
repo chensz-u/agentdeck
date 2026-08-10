@@ -108,7 +108,11 @@ describe("task API handlers", () => {
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({
-      counts: { TODO: 1, RUNNING: 1, REVIEW: 1, DONE: 0, FAILED: 1, CANCELLED: 0 },
+      counts: {
+        TODO: 1, CREATING_WORKTREE: 0, RUNNING: 1, AWAITING_INPUT: 0,
+        REVIEW: 1, MERGE_READY: 0, DONE: 0, CLEANED: 0, FAILED: 1,
+        WORKTREE_FAILED: 0, CANCELLED: 0,
+      },
     });
   });
 });

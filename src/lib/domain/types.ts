@@ -1,10 +1,34 @@
 export enum TaskStatus {
   TODO = "TODO",
+  CREATING_WORKTREE = "CREATING_WORKTREE",
   RUNNING = "RUNNING",
+  AWAITING_INPUT = "AWAITING_INPUT",
   REVIEW = "REVIEW",
+  MERGE_READY = "MERGE_READY",
   DONE = "DONE",
+  CLEANED = "CLEANED",
   FAILED = "FAILED",
+  WORKTREE_FAILED = "WORKTREE_FAILED",
   CANCELLED = "CANCELLED",
+}
+
+export enum ExecutionMode {
+  CURRENT_WORKSPACE = "CURRENT_WORKSPACE",
+  ISOLATED_WORKTREE = "ISOLATED_WORKTREE",
+}
+
+export enum WorktreeStatus {
+  CREATING = "CREATING",
+  READY = "READY",
+  FAILED = "FAILED",
+  CLEANING = "CLEANING",
+  CLEANED = "CLEANED",
+}
+
+export enum RunInputState {
+  IDLE = "IDLE",
+  AWAITING_INPUT = "AWAITING_INPUT",
+  SUBMITTED = "SUBMITTED",
 }
 
 export enum AgentRunStatus {
@@ -32,6 +56,7 @@ export type Task = {
   title: string;
   prompt: string;
   status: TaskStatus;
+  executionMode?: ExecutionMode;
   createdAt: Date;
   updatedAt: Date;
 };
@@ -47,4 +72,35 @@ export type AgentRun = {
   startedAt: Date;
   finishedAt: Date | null;
   logPath: string | null;
+  threadId?: string | null;
+  turnId?: string | null;
+  inputState?: RunInputState;
+};
+
+export type Worktree = {
+  id: string;
+  taskId: string;
+  projectId: string;
+  projectPath: string;
+  worktreePath: string;
+  taskBranch: string;
+  baselineBranch: string;
+  baselineSha: string;
+  createdAt: Date;
+  status: WorktreeStatus;
+  error: string | null;
+  cleanupRequestedAt: Date | null;
+  cleanedAt: Date | null;
+  cleanupError: string | null;
+};
+
+export type HumanInputAuditEntry = {
+  id: string;
+  sequence: number;
+  taskId: string;
+  runId: string;
+  action: string;
+  requestId: string;
+  payload: unknown;
+  createdAt: Date;
 };

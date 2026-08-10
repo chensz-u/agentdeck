@@ -16,8 +16,10 @@ export default function Home() {
       .then((response) => response.json())
       .then((body: { counts: Record<TaskStatus, number> }) => setCounts(body.counts))
       .catch(() => setCounts({
-        [TaskStatus.TODO]: 0, [TaskStatus.RUNNING]: 0, [TaskStatus.REVIEW]: 0,
-        [TaskStatus.DONE]: 0, [TaskStatus.FAILED]: 0, [TaskStatus.CANCELLED]: 0,
+        [TaskStatus.TODO]: 0, [TaskStatus.CREATING_WORKTREE]: 0, [TaskStatus.RUNNING]: 0,
+        [TaskStatus.AWAITING_INPUT]: 0, [TaskStatus.REVIEW]: 0, [TaskStatus.MERGE_READY]: 0,
+        [TaskStatus.DONE]: 0, [TaskStatus.CLEANED]: 0, [TaskStatus.FAILED]: 0,
+        [TaskStatus.WORKTREE_FAILED]: 0, [TaskStatus.CANCELLED]: 0,
       }));
   }, []);
 
