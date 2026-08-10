@@ -31,6 +31,13 @@ export enum RunInputState {
   SUBMITTED = "SUBMITTED",
 }
 
+export enum HumanInputAction {
+  REQUEST = "REQUEST",
+  APPROVE = "APPROVE",
+  REJECT = "REJECT",
+  TEXT = "TEXT",
+}
+
 export enum AgentRunStatus {
   RUNNING = "RUNNING",
   SUCCEEDED = "SUCCEEDED",
@@ -57,6 +64,7 @@ export type Task = {
   prompt: string;
   status: TaskStatus;
   executionMode?: ExecutionMode;
+  worktreeId?: string | null;
   createdAt: Date;
   updatedAt: Date;
 };
@@ -99,7 +107,7 @@ export type HumanInputAuditEntry = {
   sequence: number;
   taskId: string;
   runId: string;
-  action: string;
+  action: HumanInputAction;
   requestId: string;
   payload: unknown;
   createdAt: Date;

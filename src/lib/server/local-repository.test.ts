@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   AgentRunStatus,
   ExecutionMode,
+  HumanInputAction,
   RunInputState,
   TaskStatus,
   WorktreeStatus,
@@ -144,13 +145,14 @@ describe("LocalRepository V2 persistence", () => {
       threadId: "thread-1", turnId: "turn-1", inputState: RunInputState.AWAITING_INPUT,
     });
     const first = await repository.appendHumanInput({
-      taskId: task.id, runId: run.id, action: "requested", requestId: "request-1", payload: { question: "Proceed?" },
+      taskId: task.id, runId: run.id, action: HumanInputAction.REQUEST, requestId: "request-1", payload: { question: "Proceed?" },
     });
     const second = await repository.appendHumanInput({
-      taskId: task.id, runId: run.id, action: "submitted", requestId: "request-2", payload: { answer: "yes" },
+      taskId: task.id, runId: run.id, action: HumanInputAction.APPROVE, requestId: "request-2", payload: { answer: "yes" },
     });
 
     expect(await repository.findWorktreeByTaskId(task.id)).toMatchObject({ id: worktree.id, baselineSha: "abc123" });
+    await expect(repository.findTask(task.id)).resolves.toMatchObject({ worktreeId: worktree.id });
     expect(await repository.findLatestRun(task.id)).toMatchObject({
       threadId: "thread-1", turnId: "turn-1", inputState: RunInputState.AWAITING_INPUT,
     });
@@ -168,8 +170,8 @@ describe("LocalRepository V2 persistence", () => {
     const task = await repository.createTask({ projectId: project.id, parentTaskId: null, title: "V2", prompt: "Audit", status: TaskStatus.TODO });
     const run = await repository.createRun({ taskId: task.id, agent: "codex", status: AgentRunStatus.RUNNING, pid: null, exitCode: null, error: null, logPath: null });
 
-    const created = await repository.appendHumanInput({ taskId: task.id, runId: run.id, action: "requested", requestId: "request-1", payload: { question: "Continue?" } });
-    const replayed = await repository.appendHumanInput({ taskId: task.id, runId: run.id, action: "requested", requestId: "request-1", payload: { question: "Changed" } });
+    const created = await repository.appendHumanInput({ taskId: task.id, runId: run.id, action: HumanInputAction.REQUEST, requestId: "request-1", payload: { question: "Continue?" } });
+    const replayed = await repository.appendHumanInput({ taskId: task.id, runId: run.id, action: HumanInputAction.REQUEST, requestId: "request-1", payload: { question: "Changed" } });
 
     expect(replayed).toEqual(created);
     await expect(repository.listHumanInputs(run.id)).resolves.toHaveLength(1);
@@ -190,9 +192,55 @@ describe("LocalRepository V2 persistence", () => {
 
     const repository = new LocalRepository(dataPath);
 
-    await expect(repository.findTask("task-1")).resolves.toMatchObject({ status: TaskStatus.WORKTREE_FAILED });
+    await expect(repository.findTask("task-1")).resolves.toMatchObject({ status: TaskStatus.WORKTREE_FAILED, worktreeId: "worktree-1" });
     await expect(repository.findLatestRun("task-1")).resolves.toMatchObject({ status: AgentRunStatus.FAILED });
     await expect(repository.findWorktreeByTaskId("task-1")).resolves.toMatchObject({ id: "worktree-1", status: WorktreeStatus.READY });
     expect(JSON.parse(await readFile(dataPath, "utf8")).worktrees).toHaveLength(1);
+  });
+
+  it("associates exactly one worktree with a task", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "agentdeck-local-repository-"));
+    temporaryDirectories.push(directory);
+    const repository = new LocalRepository(join(directory, "data.json"));
+    const project = await repository.createProject({ name: "Fixture", path: directory, isGitRepository: true });
+    const task = await repository.createTask({ projectId: project.id, parentTaskId: null, title: "V2", prompt: "Worktree", status: TaskStatus.TODO });
+    const input = {
+      taskId: task.id, projectId: project.id, projectPath: project.path, worktreePath: join(directory, "worktrees", task.id),
+      taskBranch: "agentdeck/task-v2", baselineBranch: "main", baselineSha: "abc123", status: WorktreeStatus.READY,
+      error: null, cleanupRequestedAt: null, cleanedAt: null, cleanupError: null,
+    };
+
+    const worktree = await repository.createWorktree(input);
+
+    await expect(repository.createWorktree(input)).rejects.toThrow(`Task ${task.id} already has a worktree`);
+    await expect(repository.findTask(task.id)).resolves.toMatchObject({ worktreeId: worktree.id });
+  });
+
+  it("rejects illegal public task transitions while exposing an explicit recovery override", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "agentdeck-local-repository-"));
+    temporaryDirectories.push(directory);
+    const repository = new LocalRepository(join(directory, "data.json"));
+    const project = await repository.createProject({ name: "Fixture", path: directory, isGitRepository: true });
+    const task = await repository.createTask({ projectId: project.id, parentTaskId: null, title: "V2", prompt: "State", status: TaskStatus.TODO });
+
+    await expect(repository.updateTaskStatus(task.id, TaskStatus.DONE)).rejects.toThrow(
+      "Cannot transition task from TODO to DONE",
+    );
+    await repository.forceTaskStatus(task.id, TaskStatus.FAILED);
+
+    await expect(repository.findTask(task.id)).resolves.toMatchObject({ status: TaskStatus.FAILED });
+  });
+
+  it("accepts only supported human input actions", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "agentdeck-local-repository-"));
+    temporaryDirectories.push(directory);
+    const repository = new LocalRepository(join(directory, "data.json"));
+    const project = await repository.createProject({ name: "Fixture", path: directory, isGitRepository: true });
+    const task = await repository.createTask({ projectId: project.id, parentTaskId: null, title: "V2", prompt: "Audit", status: TaskStatus.TODO });
+    const run = await repository.createRun({ taskId: task.id, agent: "codex", status: AgentRunStatus.RUNNING, pid: null, exitCode: null, error: null, logPath: null });
+
+    await expect(repository.appendHumanInput({
+      taskId: task.id, runId: run.id, action: "unknown" as HumanInputAction, requestId: "request-invalid", payload: {},
+    })).rejects.toThrow("Unsupported human input action: unknown");
   });
 });

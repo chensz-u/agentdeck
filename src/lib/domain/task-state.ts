@@ -9,7 +9,6 @@ const legalTransitions: Readonly<Record<TaskStatus, readonly TaskStatus[]>> = {
   ],
   [TaskStatus.RUNNING]: [
     TaskStatus.REVIEW,
-    TaskStatus.MERGE_READY,
     TaskStatus.AWAITING_INPUT,
     TaskStatus.FAILED,
     TaskStatus.CANCELLED,
@@ -20,7 +19,7 @@ const legalTransitions: Readonly<Record<TaskStatus, readonly TaskStatus[]>> = {
     TaskStatus.CANCELLED,
     TaskStatus.WORKTREE_FAILED,
   ],
-  [TaskStatus.REVIEW]: [TaskStatus.DONE],
+  [TaskStatus.REVIEW]: [TaskStatus.MERGE_READY, TaskStatus.DONE, TaskStatus.CLEANED],
   [TaskStatus.MERGE_READY]: [TaskStatus.CLEANED, TaskStatus.DONE],
   [TaskStatus.DONE]: [],
   [TaskStatus.CLEANED]: [],

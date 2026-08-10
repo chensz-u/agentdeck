@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import {
   AgentRunStatus,
   ExecutionMode,
+  HumanInputAction,
   RunInputState,
   TaskStatus,
   type AgentRun,
@@ -14,6 +15,7 @@ import {
   type Task,
   type Worktree,
 } from "../domain/types";
+import { transitionTask } from "../domain/task-state";
 import type { ProjectStore } from "../api/project-route-handlers";
 import type { TaskApiStore } from "../api/task-route-handlers";
 import type { RunLifecycleRepository } from "../services/run-service";
@@ -154,6 +156,7 @@ export class LocalRepository implements ProjectStore, TaskApiStore, RunLifecycle
       const task: StoredTask = {
         ...input,
         executionMode: input.executionMode ?? ExecutionMode.CURRENT_WORKSPACE,
+        worktreeId: input.worktreeId ?? null,
         id: randomUUID(),
         createdAt: now,
         updatedAt: now,
@@ -220,6 +223,16 @@ export class LocalRepository implements ProjectStore, TaskApiStore, RunLifecycle
     await this.mutate(() => {
       const task = this.data.tasks.find((candidate) => candidate.id === taskId);
       if (!task) throw new Error(`Task ${taskId} was not found`);
+      task.status = transitionTask(task.status, status);
+      task.updatedAt = new Date().toISOString();
+    });
+  }
+
+  /** Bypasses the public state machine for restart recovery and explicit operator repair. */
+  async forceTaskStatus(taskId: string, status: TaskStatus): Promise<void> {
+    await this.mutate(() => {
+      const task = this.data.tasks.find((candidate) => candidate.id === taskId);
+      if (!task) throw new Error(`Task ${taskId} was not found`);
       task.status = status;
       task.updatedAt = new Date().toISOString();
     });
@@ -256,6 +269,10 @@ export class LocalRepository implements ProjectStore, TaskApiStore, RunLifecycle
       if (!this.data.tasks.some((task) => task.id === input.taskId)) {
         throw new Error(`Task ${input.taskId} was not found`);
       }
+      const task = this.data.tasks.find((candidate) => candidate.id === input.taskId)!;
+      if (task.worktreeId || this.data.worktrees.some((worktree) => worktree.taskId === input.taskId)) {
+        throw new Error(`Task ${input.taskId} already has a worktree`);
+      }
       const worktree: StoredWorktree = {
         ...input,
         id: randomUUID(),
@@ -264,6 +281,8 @@ export class LocalRepository implements ProjectStore, TaskApiStore, RunLifecycle
         cleanedAt: input.cleanedAt?.toISOString() ?? null,
       };
       this.data.worktrees.push(worktree);
+      task.worktreeId = worktree.id;
+      task.updatedAt = worktree.createdAt;
       return asWorktree(worktree);
     });
   }
@@ -292,6 +311,9 @@ export class LocalRepository implements ProjectStore, TaskApiStore, RunLifecycle
 
   async appendHumanInput(input: Omit<HumanInputAuditEntry, "id" | "sequence" | "createdAt">): Promise<HumanInputAuditEntry> {
     return this.mutate(() => {
+      if (!Object.values(HumanInputAction).includes(input.action)) {
+        throw new Error(`Unsupported human input action: ${input.action}`);
+      }
       const existing = this.data.humanInputs.find((candidate) => candidate.runId === input.runId && candidate.requestId === input.requestId);
       if (existing) return asHumanInput(existing);
       const entry: StoredHumanInput = {
@@ -328,9 +350,14 @@ export class LocalRepository implements ProjectStore, TaskApiStore, RunLifecycle
       if (!Array.isArray(data.projects) || !Array.isArray(data.tasks) || !Array.isArray(data.runs) || !data.diffs) {
         throw new Error("missing storage collections");
       }
+      const storedWorktrees = Array.isArray(data.worktrees) ? data.worktrees : [];
       const loaded: StoredData = {
         projects: data.projects,
-        tasks: data.tasks.map((task) => ({ ...task, executionMode: task.executionMode ?? ExecutionMode.CURRENT_WORKSPACE })),
+        tasks: data.tasks.map((task) => ({
+          ...task,
+          executionMode: task.executionMode ?? ExecutionMode.CURRENT_WORKSPACE,
+          worktreeId: task.worktreeId ?? storedWorktrees.find((worktree) => worktree.taskId === task.id)?.id ?? null,
+        })),
         runs: data.runs.map((run) => ({
           ...run,
           threadId: run.threadId ?? null,
@@ -338,11 +365,12 @@ export class LocalRepository implements ProjectStore, TaskApiStore, RunLifecycle
           inputState: run.inputState ?? RunInputState.IDLE,
         })),
         diffs: data.diffs,
-        worktrees: Array.isArray(data.worktrees) ? data.worktrees : [],
+        worktrees: storedWorktrees,
         humanInputs: Array.isArray(data.humanInputs) ? data.humanInputs : [],
       };
       const migrated = !Array.isArray(data.worktrees) || !Array.isArray(data.humanInputs)
         || data.tasks.some((task) => task.executionMode === undefined)
+        || data.tasks.some((task) => task.worktreeId === undefined)
         || data.runs.some((run) => run.threadId === undefined || run.turnId === undefined || run.inputState === undefined);
       const reconciled = this.reconcileInterruptedWork(loaded);
       if (migrated || reconciled) this.writeSynchronously(loaded);
