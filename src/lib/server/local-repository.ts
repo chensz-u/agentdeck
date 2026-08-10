@@ -479,6 +479,10 @@ export class LocalRepository implements ProjectStore, TaskApiStore, RunLifecycle
   private reconcileInterruptedCleanups(data: StoredData): boolean {
     let changed = false;
     for (const worktree of data.worktrees) {
+      if (worktree.status === WorktreeStatus.CLEANED) {
+        changed = this.reconcileCleanedTask(data, worktree) || changed;
+        continue;
+      }
       if (worktree.status !== WorktreeStatus.CLEANING) continue;
       const project = data.projects.find((candidate) => candidate.id === worktree.projectId);
       const expectedPath = project ? resolve(project.path, ".agentdeck", "worktrees", `task-${safeId(worktree.taskId)}`) : null;
@@ -492,6 +496,11 @@ export class LocalRepository implements ProjectStore, TaskApiStore, RunLifecycle
       if (worktreePresent && branchPresent) {
         worktree.status = WorktreeStatus.READY;
         worktree.cleanupError = null;
+      } else if (!worktreePresent && !branchPresent) {
+        worktree.status = WorktreeStatus.CLEANED;
+        worktree.cleanedAt = new Date().toISOString();
+        worktree.cleanupError = null;
+        this.reconcileCleanedTask(data, worktree);
       } else {
         worktree.status = WorktreeStatus.CLEANUP_FAILED;
         worktree.cleanupError = !managedRecord
@@ -501,6 +510,15 @@ export class LocalRepository implements ProjectStore, TaskApiStore, RunLifecycle
       changed = true;
     }
     return changed;
+  }
+
+  private reconcileCleanedTask(data: StoredData, worktree: StoredWorktree): boolean {
+    const task = data.tasks.find((candidate) => candidate.id === worktree.taskId);
+    if (!task || task.status === TaskStatus.CLEANED) return false;
+    if (![TaskStatus.REVIEW, TaskStatus.MERGE_READY, TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.WORKTREE_FAILED].includes(task.status)) return false;
+    task.status = TaskStatus.CLEANED;
+    task.updatedAt = new Date().toISOString();
+    return true;
   }
 
   private writeSynchronously(data: StoredData): void {

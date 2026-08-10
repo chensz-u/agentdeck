@@ -325,6 +325,42 @@ describe("LocalRepository V2 persistence", () => {
     });
   });
 
+  it("converges an interrupted CLEANING record to CLEANED when both managed resources are already gone", async () => {
+    const directory = await createGitFixture();
+    temporaryDirectories.push(directory);
+    const dataPath = join(directory, ".agentdeck", "data.json");
+    const worktreePath = join(directory, ".agentdeck", "worktrees", "task-task-1");
+    const taskBranch = "agentdeck/task-task-1";
+    git(directory, ["worktree", "add", "--quiet", "-b", taskBranch, worktreePath, "HEAD"]);
+    git(directory, ["worktree", "remove", "--force", worktreePath]);
+    git(directory, ["branch", "--delete", "--force", taskBranch]);
+    await writeFile(dataPath, JSON.stringify({
+      projects: [{ id: "project-1", name: "Fixture", path: directory, gitEnabled: true, gitRemote: null, gitBranch: "main", createdAt: "2026-08-10T00:00:00.000Z", updatedAt: "2026-08-10T00:00:00.000Z" }],
+      tasks: [{ id: "task-1", projectId: "project-1", parentTaskId: null, title: "Interrupted cleanup", prompt: "Clean", status: TaskStatus.CANCELLED, executionMode: ExecutionMode.ISOLATED_WORKTREE, worktreeId: "worktree-1", createdAt: "2026-08-10T00:00:00.000Z", updatedAt: "2026-08-10T00:00:00.000Z" }],
+      runs: [], diffs: {}, humanInputs: [],
+      worktrees: [{ id: "worktree-1", taskId: "task-1", projectId: "project-1", projectPath: directory, worktreePath, taskBranch, baselineBranch: "master", baselineSha: git(directory, ["rev-parse", "HEAD"]), createdAt: "2026-08-10T00:00:00.000Z", status: WorktreeStatus.CLEANING, error: null, cleanupRequestedAt: "2026-08-10T00:01:00.000Z", cleanedAt: null, cleanupError: null }],
+    }), "utf8");
+
+    const repository = new LocalRepository(dataPath);
+
+    await expect(repository.findWorktreeByTaskId("task-1")).resolves.toMatchObject({ status: WorktreeStatus.CLEANED, cleanupError: null });
+    await expect(repository.findTask("task-1")).resolves.toMatchObject({ status: TaskStatus.CLEANED });
+  });
+
+  it("converges a stale terminal task when its worktree was already persisted as CLEANED", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "agentdeck-local-repository-"));
+    temporaryDirectories.push(directory);
+    const dataPath = join(directory, "data.json");
+    await writeFile(dataPath, JSON.stringify({
+      projects: [{ id: "project-1", name: "Fixture", path: directory, gitEnabled: true, gitRemote: null, gitBranch: "main", createdAt: "2026-08-10T00:00:00.000Z", updatedAt: "2026-08-10T00:00:00.000Z" }],
+      tasks: [{ id: "task-1", projectId: "project-1", parentTaskId: null, title: "Stale cleanup", prompt: "Clean", status: TaskStatus.FAILED, executionMode: ExecutionMode.ISOLATED_WORKTREE, worktreeId: "worktree-1", createdAt: "2026-08-10T00:00:00.000Z", updatedAt: "2026-08-10T00:00:00.000Z" }],
+      runs: [], diffs: {}, humanInputs: [],
+      worktrees: [{ id: "worktree-1", taskId: "task-1", projectId: "project-1", projectPath: directory, worktreePath: join(directory, ".agentdeck", "worktrees", "task-task-1"), taskBranch: "agentdeck/task-task-1", baselineBranch: "main", baselineSha: "a".repeat(40), createdAt: "2026-08-10T00:00:00.000Z", status: WorktreeStatus.CLEANED, error: null, cleanupRequestedAt: "2026-08-10T00:01:00.000Z", cleanedAt: "2026-08-10T00:02:00.000Z", cleanupError: null }],
+    }), "utf8");
+
+    await expect(new LocalRepository(dataPath).findTask("task-1")).resolves.toMatchObject({ status: TaskStatus.CLEANED });
+  });
+
   it("rejects illegal public task transitions while exposing an explicit recovery override", async () => {
     const directory = await mkdtemp(join(tmpdir(), "agentdeck-local-repository-"));
     temporaryDirectories.push(directory);

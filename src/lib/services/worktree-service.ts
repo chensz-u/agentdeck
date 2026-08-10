@@ -112,6 +112,13 @@ export class WorktreeService {
     const claimed = await this.options.repository.claimWorktreeCleanup(worktree.id, this.now());
 
     try {
+      if (!existsSync(claimed.worktreePath)) {
+        if (await this.branchExists(projectPath, claimed.taskBranch)) {
+          await this.git(projectPath, ["branch", "--delete", "--force", claimed.taskBranch]);
+        }
+        await this.markCleaned(task.id, worktree.id);
+        return;
+      }
       const status = await this.gitRaw(claimed.worktreePath, ["status", "--porcelain=v1", "-z"]);
       const inspection = parseStatus(status);
       if (!inspection.isClean) throw new Error("worktree has uncommitted changes");
@@ -122,12 +129,7 @@ export class WorktreeService {
       } catch (error) {
         throw new Error(`Worktree was removed but branch ${claimed.taskBranch} could not be deleted: ${message(error)}`);
       }
-      await this.options.repository.updateWorktree(worktree.id, {
-        status: WorktreeStatus.CLEANED,
-        cleanedAt: this.now(),
-        cleanupError: null,
-      });
-      await this.options.repository.updateTaskStatus(task.id, TaskStatus.CLEANED);
+      await this.markCleaned(task.id, worktree.id);
     } catch (error) {
       const cleanupError = message(error);
       await this.options.repository.updateWorktree(worktree.id, {
@@ -136,6 +138,15 @@ export class WorktreeService {
       });
       throw error;
     }
+  }
+
+  private async markCleaned(taskId: string, worktreeId: string): Promise<void> {
+    await this.options.repository.updateWorktree(worktreeId, {
+      status: WorktreeStatus.CLEANED,
+      cleanedAt: this.now(),
+      cleanupError: null,
+    });
+    await this.options.repository.updateTaskStatus(taskId, TaskStatus.CLEANED);
   }
 
   private async requireTaskContext(taskId: string): Promise<{ task: Task; project: Project }> {

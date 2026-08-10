@@ -286,6 +286,13 @@ describe("WorktreeService", () => {
       status: "CLEANUP_FAILED",
       cleanupError: expect.stringContaining(`Worktree was removed but branch ${worktree.taskBranch} could not be deleted`),
     });
+
+    rmSync(lockPath, { force: true });
+    await service.cleanup("task-1");
+
+    expect(repository.worktree).toMatchObject({ status: WorktreeStatus.CLEANED });
+    expect(repository.task.status).toBe(TaskStatus.CLEANED);
+    expect(() => git(path, ["rev-parse", "--verify", worktree.taskBranch])).toThrow();
   });
 
   it("rejects repeated cleanup after the READY worktree has been cleaned", async () => {
