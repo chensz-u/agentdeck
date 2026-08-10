@@ -12,6 +12,8 @@ export interface WorktreeRepository {
   findWorktreeByTaskId(taskId: string): Promise<Worktree | null>;
   /** This must atomically store the worktree and link it to its task. */
   createWorktree(input: Omit<Worktree, "id" | "createdAt">): Promise<Worktree>;
+  /** Atomically claims a READY worktree for cleanup. */
+  claimWorktreeCleanup(worktreeId: string, requestedAt: Date): Promise<Worktree>;
   updateWorktree(
     worktreeId: string,
     update: Partial<Omit<Worktree, "id" | "taskId" | "projectId" | "projectPath" | "worktreePath" | "taskBranch" | "baselineBranch" | "baselineSha" | "createdAt">>,
@@ -77,7 +79,10 @@ export class WorktreeService {
         cleanupError: null,
       });
     } catch (error) {
-      if (worktreeCreated) await this.rollbackCreation(projectPath, worktreePath, taskBranch);
+      if (worktreeCreated) {
+        const rollbackError = await this.rollbackCreation(projectPath, worktreePath, taskBranch);
+        if (rollbackError) throw new Error(`${message(error)}; rollback cleanup failed: ${rollbackError}`);
+      }
       throw error;
     }
   }
@@ -86,7 +91,7 @@ export class WorktreeService {
     const worktree = await this.requireWorktree(taskId);
     const { project } = await this.requireTaskContext(taskId);
     const projectPath = await this.requireRegisteredGitProject(project);
-    this.assertManagedWorktreePath(projectPath, worktree);
+    this.assertManagedWorktree(projectPath, worktree);
     const status = await this.gitRaw(worktree.worktreePath, ["status", "--porcelain=v1", "-z"]);
     return parseStatus(status);
   }
@@ -96,31 +101,33 @@ export class WorktreeService {
     const worktree = await this.requireWorktree(task.id);
     const projectPath = await this.requireRegisteredGitProject(project);
 
+    this.assertManagedWorktree(projectPath, worktree);
+    if (![TaskStatus.REVIEW, TaskStatus.MERGE_READY, TaskStatus.DONE].includes(task.status)) {
+      throw new Error("Cleanup is only allowed for REVIEW, MERGE_READY, or DONE tasks");
+    }
+    const claimed = await this.options.repository.claimWorktreeCleanup(worktree.id, this.now());
+
     try {
-      this.assertManagedWorktreePath(projectPath, worktree);
-      await this.options.repository.updateWorktree(worktree.id, {
-        status: WorktreeStatus.CLEANING,
-        cleanupRequestedAt: this.now(),
-        cleanupError: null,
-      });
-      if (![TaskStatus.REVIEW, TaskStatus.MERGE_READY, TaskStatus.DONE].includes(task.status)) {
-        throw new Error("Cleanup is only allowed for REVIEW, MERGE_READY, or DONE tasks");
-      }
-      const inspection = await this.inspect(task.id);
+      const status = await this.gitRaw(claimed.worktreePath, ["status", "--porcelain=v1", "-z"]);
+      const inspection = parseStatus(status);
       if (!inspection.isClean) throw new Error("worktree has uncommitted changes");
 
-      await this.git(projectPath, ["worktree", "remove", worktree.worktreePath]);
-      await this.git(projectPath, ["branch", "--delete", "--force", worktree.taskBranch]);
+      await this.git(projectPath, ["worktree", "remove", claimed.worktreePath]);
+      try {
+        await this.git(projectPath, ["branch", "--delete", "--force", claimed.taskBranch]);
+      } catch (error) {
+        throw new Error(`Worktree was removed but branch ${claimed.taskBranch} could not be deleted: ${message(error)}`);
+      }
       await this.options.repository.updateWorktree(worktree.id, {
         status: WorktreeStatus.CLEANED,
         cleanedAt: this.now(),
         cleanupError: null,
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const cleanupError = message(error);
       await this.options.repository.updateWorktree(worktree.id, {
-        status: WorktreeStatus.READY,
-        cleanupError: message,
+        status: WorktreeStatus.CLEANUP_FAILED,
+        cleanupError,
       });
       throw error;
     }
@@ -166,7 +173,7 @@ export class WorktreeService {
     }
   }
 
-  private assertManagedWorktreePath(projectPath: string, worktree: Worktree): void {
+  private assertManagedWorktree(projectPath: string, worktree: Worktree): void {
     const expected = resolve(projectPath, ".agentdeck", "worktrees", `task-${safeId(worktree.taskId, "task")}`);
     if (resolve(worktree.projectPath) !== resolve(projectPath) || resolve(worktree.worktreePath) !== expected) {
       throw new Error("Persisted worktree path is outside the managed project location");
@@ -174,13 +181,24 @@ export class WorktreeService {
     if (resolve(worktree.worktreePath) === resolve(projectPath)) {
       throw new Error("Refusing to remove the registered project root");
     }
+    if (worktree.taskBranch !== `agentdeck/task-${safeId(worktree.taskId, "task")}`) {
+      throw new Error("Persisted worktree branch does not match the managed task branch");
+    }
   }
 
-  private async rollbackCreation(projectPath: string, worktreePath: string, taskBranch: string): Promise<void> {
-    await Promise.allSettled([
-      this.git(projectPath, ["worktree", "remove", "--force", worktreePath]),
-      this.git(projectPath, ["branch", "--delete", "--force", taskBranch]),
-    ]);
+  private async rollbackCreation(projectPath: string, worktreePath: string, taskBranch: string): Promise<string | null> {
+    const failures: string[] = [];
+    try {
+      await this.git(projectPath, ["worktree", "remove", "--force", worktreePath]);
+    } catch (error) {
+      failures.push(`worktree removal: ${message(error)}`);
+    }
+    try {
+      await this.git(projectPath, ["branch", "--delete", "--force", taskBranch]);
+    } catch (error) {
+      failures.push(`branch deletion: ${message(error)}`);
+    }
+    return failures.length ? failures.join("; ") : null;
   }
 
   private async git(cwd: string, args: readonly string[]): Promise<string> {
@@ -191,6 +209,10 @@ export class WorktreeService {
     const { stdout } = await execFileAsync("git", args, { cwd, encoding: "utf8" });
     return stdout;
   }
+}
+
+function message(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function safeId(value: string, label: string): string {

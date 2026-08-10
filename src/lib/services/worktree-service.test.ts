@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -20,6 +20,10 @@ function createGitFixture(): string {
   git(directory, ["add", "README.md"]);
   git(directory, ["commit", "--quiet", "-m", "initial"]);
   return directory;
+}
+
+function branchLockPath(projectPath: string): string {
+  return join(projectPath, ".git", "refs", "heads", "agentdeck", "task-task-1.lock");
 }
 
 function fixtureTask(overrides: Partial<Task> = {}): Task {
@@ -68,6 +72,15 @@ class MemoryWorktreeRepository implements WorktreeRepository {
 
   async createWorktree(input: Omit<Worktree, "id" | "createdAt">): Promise<Worktree> {
     this.worktree = { ...input, id: "worktree-1", createdAt: new Date("2026-08-10T00:00:00.000Z") };
+    return this.worktree;
+  }
+
+  async claimWorktreeCleanup(id: string, requestedAt: Date): Promise<Worktree> {
+    if (!this.worktree || this.worktree.id !== id) throw new Error("Worktree not found");
+    if (this.worktree.status !== WorktreeStatus.READY) throw new Error(`Worktree ${id} is not READY for cleanup`);
+    this.worktree.status = WorktreeStatus.CLEANING;
+    this.worktree.cleanupRequestedAt = requestedAt;
+    this.worktree.cleanupError = null;
     return this.worktree;
   }
 
@@ -139,7 +152,26 @@ describe("WorktreeService", () => {
     await expect(new WorktreeService({ repository }).create("task-1")).rejects.toThrow("disk full");
 
     expect(existsSync(worktreePath)).toBe(false);
-    expect(() => git(path, ["rev-parse", "--verify", "agentdeck/task-1"])).toThrow();
+    expect(() => git(path, ["rev-parse", "--verify", "agentdeck/task-task-1"])).toThrow();
+  });
+
+  it("reports a rollback cleanup failure after removing the worktree before branch deletion", async () => {
+    const path = createGitFixture();
+    fixtures.push(path);
+    const repository = new MemoryWorktreeRepository(fixtureTask(), fixtureProject(path));
+    repository.createWorktree = async () => {
+      const lockPath = branchLockPath(path);
+      mkdirSync(join(lockPath, ".."), { recursive: true });
+      writeFileSync(lockPath, "locked\n");
+      throw new Error("disk full");
+    };
+    const worktreePath = join(path, ".agentdeck", "worktrees", "task-task-1");
+
+    await expect(new WorktreeService({ repository }).create("task-1"))
+      .rejects.toThrow("disk full; rollback cleanup failed");
+
+    expect(existsSync(worktreePath)).toBe(false);
+    expect(() => git(path, ["rev-parse", "--verify", "agentdeck/task-task-1"])).not.toThrow();
   });
 
   it("inspects clean and dirty worktree status using the persisted path", async () => {
@@ -165,7 +197,7 @@ describe("WorktreeService", () => {
     await expect(service.cleanup("task-1")).rejects.toThrow("worktree has uncommitted changes");
 
     expect(existsSync(worktree.worktreePath)).toBe(true);
-    expect(repository.worktree).toMatchObject({ status: WorktreeStatus.READY, cleanupError: "worktree has uncommitted changes" });
+    expect(repository.worktree).toMatchObject({ status: WorktreeStatus.CLEANUP_FAILED, cleanupError: "worktree has uncommitted changes" });
   });
 
   it("only cleans a clean REVIEW, MERGE_READY, or DONE task and never the project root", async () => {
@@ -181,6 +213,52 @@ describe("WorktreeService", () => {
     expect(existsSync(path)).toBe(true);
     expect(repository.worktree).toMatchObject({ status: WorktreeStatus.CLEANED, cleanupError: null });
     expect(() => git(path, ["rev-parse", "--verify", worktree.taskBranch])).toThrow();
+  });
+
+  it("rejects a tampered persisted task branch before deleting the managed worktree", async () => {
+    const path = createGitFixture();
+    fixtures.push(path);
+    const repository = new MemoryWorktreeRepository(fixtureTask({ status: TaskStatus.REVIEW }), fixtureProject(path));
+    const service = new WorktreeService({ repository });
+    const worktree = await service.create("task-1");
+    repository.worktree!.taskBranch = "agentdeck/not-derived-from-task-id";
+
+    await expect(service.cleanup("task-1")).rejects.toThrow("Persisted worktree branch does not match the managed task branch");
+
+    expect(existsSync(worktree.worktreePath)).toBe(true);
+    expect(() => git(path, ["rev-parse", "--verify", "agentdeck/task-task-1"])).not.toThrow();
+  });
+
+  it("records a partial cleanup as CLEANUP_FAILED when worktree removal succeeds but branch deletion fails", async () => {
+    const path = createGitFixture();
+    fixtures.push(path);
+    const repository = new MemoryWorktreeRepository(fixtureTask({ status: TaskStatus.REVIEW }), fixtureProject(path));
+    const service = new WorktreeService({ repository });
+    const worktree = await service.create("task-1");
+    const lockPath = branchLockPath(path);
+    mkdirSync(join(lockPath, ".."), { recursive: true });
+    writeFileSync(lockPath, "locked\n");
+
+    await expect(service.cleanup("task-1"))
+      .rejects.toThrow(`Worktree was removed but branch ${worktree.taskBranch} could not be deleted`);
+
+    expect(existsSync(worktree.worktreePath)).toBe(false);
+    expect(repository.worktree).toMatchObject({
+      status: "CLEANUP_FAILED",
+      cleanupError: expect.stringContaining(`Worktree was removed but branch ${worktree.taskBranch} could not be deleted`),
+    });
+  });
+
+  it("rejects repeated cleanup after the READY worktree has been cleaned", async () => {
+    const path = createGitFixture();
+    fixtures.push(path);
+    const repository = new MemoryWorktreeRepository(fixtureTask({ status: TaskStatus.DONE }), fixtureProject(path));
+    const service = new WorktreeService({ repository });
+    await service.create("task-1");
+    await service.cleanup("task-1");
+
+    await expect(service.cleanup("task-1")).rejects.toThrow("is not READY for cleanup");
+    expect(repository.worktree).toMatchObject({ status: WorktreeStatus.CLEANED });
   });
 
   it("refuses cleanup before a task reaches review state", async () => {

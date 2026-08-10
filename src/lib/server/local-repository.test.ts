@@ -216,6 +216,31 @@ describe("LocalRepository V2 persistence", () => {
     await expect(repository.findTask(task.id)).resolves.toMatchObject({ worktreeId: worktree.id });
   });
 
+  it("atomically claims only a READY worktree for cleanup", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "agentdeck-local-repository-"));
+    temporaryDirectories.push(directory);
+    const repository = new LocalRepository(join(directory, "data.json"));
+    const project = await repository.createProject({ name: "Fixture", path: directory, isGitRepository: true });
+    const task = await repository.createTask({ projectId: project.id, parentTaskId: null, title: "V2", prompt: "Worktree", status: TaskStatus.TODO });
+    const worktree = await repository.createWorktree({
+      taskId: task.id, projectId: project.id, projectPath: project.path, worktreePath: join(directory, "worktrees", task.id),
+      taskBranch: "agentdeck/task-v2", baselineBranch: "main", baselineSha: "abc123", status: WorktreeStatus.READY,
+      error: null, cleanupRequestedAt: null, cleanedAt: null, cleanupError: null,
+    });
+
+    const results = await Promise.allSettled([
+      repository.claimWorktreeCleanup(worktree.id, new Date("2026-08-10T01:00:00.000Z")),
+      repository.claimWorktreeCleanup(worktree.id, new Date("2026-08-10T01:00:00.000Z")),
+    ]);
+
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+    await expect(repository.findWorktreeByTaskId(task.id)).resolves.toMatchObject({
+      status: WorktreeStatus.CLEANING,
+      cleanupRequestedAt: new Date("2026-08-10T01:00:00.000Z"),
+    });
+  });
+
   it("rejects illegal public task transitions while exposing an explicit recovery override", async () => {
     const directory = await mkdtemp(join(tmpdir(), "agentdeck-local-repository-"));
     temporaryDirectories.push(directory);

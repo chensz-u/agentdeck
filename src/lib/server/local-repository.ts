@@ -9,6 +9,7 @@ import {
   HumanInputAction,
   RunInputState,
   TaskStatus,
+  WorktreeStatus,
   type AgentRun,
   type HumanInputAuditEntry,
   type Project,
@@ -291,6 +292,20 @@ export class LocalRepository implements ProjectStore, TaskApiStore, RunLifecycle
     await this.writeQueue;
     const worktree = this.data.worktrees.find((candidate) => candidate.taskId === taskId);
     return worktree ? asWorktree(worktree) : null;
+  }
+
+  async claimWorktreeCleanup(worktreeId: string, requestedAt: Date): Promise<Worktree> {
+    return this.mutate(() => {
+      const worktree = this.data.worktrees.find((candidate) => candidate.id === worktreeId);
+      if (!worktree) throw new Error(`Worktree ${worktreeId} was not found`);
+      if (worktree.status !== WorktreeStatus.READY) {
+        throw new Error(`Worktree ${worktreeId} is not READY for cleanup`);
+      }
+      worktree.status = WorktreeStatus.CLEANING;
+      worktree.cleanupRequestedAt = requestedAt.toISOString();
+      worktree.cleanupError = null;
+      return asWorktree(worktree);
+    });
   }
 
   async updateWorktree(

@@ -23,6 +23,7 @@ export enum WorktreeStatus {
   FAILED = "FAILED",
   CLEANING = "CLEANING",
   CLEANED = "CLEANED",
+  CLEANUP_FAILED = "CLEANUP_FAILED",
 }
 
 export enum RunInputState {
