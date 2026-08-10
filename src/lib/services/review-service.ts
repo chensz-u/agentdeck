@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { ExecutionMode, WorktreeStatus, type Project, type Task, type Worktree } from "../domain/types";
 
 const execFileAsync = promisify(execFile);
+const objectIdPattern = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
 
 export interface ReviewRepository {
   findTaskWithProject(taskId: string): Promise<{ task: Task; project: Project } | null>;
@@ -42,18 +43,19 @@ export class ReviewService {
     if (resolve(worktreeRoot) !== resolve(worktree.worktreePath)) {
       throw new Error("Persisted worktree path is not a Git working tree root");
     }
+    const baselineSha = await this.verifyBaselineSha(worktree.worktreePath, worktree.baselineSha);
 
     const [changed, untracked, diff, commitSummary] = await Promise.all([
-      this.git(worktree.worktreePath, ["diff", "--name-only", worktree.baselineSha]),
+      this.gitRaw(worktree.worktreePath, ["diff", "--name-only", "-z", baselineSha]),
       this.gitRaw(worktree.worktreePath, ["ls-files", "-z", "--others", "--exclude-standard"]),
-      this.gitRaw(worktree.worktreePath, ["diff", "--no-color", worktree.baselineSha]),
-      this.git(worktree.worktreePath, ["log", "--oneline", `${worktree.baselineSha}..${worktree.taskBranch}`]),
+      this.gitRaw(worktree.worktreePath, ["diff", "--no-color", baselineSha]),
+      this.git(worktree.worktreePath, ["log", "--oneline", `${baselineSha}..${worktree.taskBranch}`]),
     ]);
     const untrackedPaths = untracked.split("\0").filter(Boolean);
     const untrackedDiffs = await Promise.all(untrackedPaths.map((path) => this.diffUntracked(worktree.worktreePath, path)));
 
     return {
-      changedPaths: [...new Set([...changed.split("\n").filter(Boolean), ...untrackedPaths])],
+      changedPaths: [...new Set([...changed.split("\0").filter(Boolean), ...untrackedPaths])],
       diff: [diff, ...untrackedDiffs].join(""),
       commitSummary,
     };
@@ -89,6 +91,17 @@ export class ReviewService {
     }
     if (worktree.taskBranch !== `agentdeck/task-${safeId(worktree.taskId, "task")}`) {
       throw new Error("Persisted worktree branch does not match the managed task branch");
+    }
+  }
+
+  private async verifyBaselineSha(worktreePath: string, baselineSha: string): Promise<string> {
+    if (!objectIdPattern.test(baselineSha)) {
+      throw new Error("Persisted worktree baseline SHA is not a valid Git object ID");
+    }
+    try {
+      return await this.git(worktreePath, ["rev-parse", "--verify", `${baselineSha}^{commit}`]);
+    } catch {
+      throw new Error("Persisted worktree baseline SHA does not resolve to a commit");
     }
   }
 

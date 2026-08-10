@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ExecutionMode, TaskStatus, WorktreeStatus, type Project, type Task, type Worktree } from "../domain/types";
 import { ReviewService, type ReviewRepository } from "./review-service";
@@ -171,5 +171,67 @@ describe("ReviewService", () => {
         fixtureWorktree(projectPath, baselineSha),
       ),
     }).getReview("task-1")).rejects.toThrow("not configured for an isolated worktree");
+  });
+
+  it("rejects option-like and unresolved persisted baseline SHAs before producing a review", async () => {
+    const projectPath = createFixture();
+    fixtures.push(projectPath);
+    const baselineSha = git(projectPath, ["rev-parse", "HEAD"]);
+    const worktree = fixtureWorktree(projectPath, baselineSha);
+    git(projectPath, ["worktree", "add", "--quiet", "-b", worktree.taskBranch, worktree.worktreePath, baselineSha]);
+    const repository = new MemoryReviewRepository(fixtureTask(), fixtureProject(projectPath), worktree);
+    const service = new ReviewService({ repository });
+
+    repository.worktree.baselineSha = "--no-index";
+    await expect(service.getReview("task-1")).rejects.toThrow("baseline SHA is not a valid Git object ID");
+
+    repository.worktree.baselineSha = "f".repeat(40);
+    await expect(service.getReview("task-1")).rejects.toThrow("baseline SHA does not resolve to a commit");
+  });
+
+  it("preserves newline-containing tracked and untracked paths from NUL-delimited Git output", async () => {
+    const projectPath = createFixture();
+    fixtures.push(projectPath);
+    const baselineSha = "a".repeat(40);
+    const worktree = fixtureWorktree(projectPath, baselineSha);
+    const trackedPath = "tracked\nname.txt";
+    const untrackedPath = "untracked\nname.txt";
+    const repository = new MemoryReviewRepository(fixtureTask(), fixtureProject(projectPath), worktree);
+
+    const execFile = (...call: unknown[]) => {
+      const [file, args, options, callback] = call as [string, string[], { cwd: string }, (error: Error | null, stdout?: unknown) => void];
+      expect(file).toBe("git");
+      if (args[0] === "rev-parse") return callback(null, {
+        stdout: args.includes("--show-toplevel") ? options.cwd : baselineSha,
+      });
+      if (args[0] === "diff" && args[1] === "--name-only") {
+        if (!args.includes("-z")) return callback(new Error("tracked paths must be NUL-delimited"));
+        return callback(null, { stdout: `${trackedPath}\0` });
+      }
+      if (args[0] === "ls-files") return callback(null, { stdout: `${untrackedPath}\0` });
+      if (args[0] === "diff" && args.includes("--no-index")) {
+        const error = Object.assign(new Error("untracked diff"), { stdout: "+untracked\n" });
+        return callback(error);
+      }
+      if (args[0] === "diff") return callback(null, { stdout: "+tracked\n" });
+      if (args[0] === "log") return callback(null, { stdout: "" });
+      return callback(new Error(`Unexpected Git arguments: ${args.join(" ")}`));
+    };
+
+    vi.resetModules();
+    vi.doMock("node:child_process", async (importOriginal) => ({
+      ...await importOriginal<typeof import("node:child_process")>(),
+      execFile,
+    }));
+    try {
+      const { ReviewService: MockedReviewService } = await import("./review-service");
+      await expect(new MockedReviewService({ repository }).getReview("task-1")).resolves.toMatchObject({
+        changedPaths: [trackedPath, untrackedPath],
+        diff: expect.stringContaining("+untracked"),
+      });
+    } finally {
+      vi.doUnmock("node:child_process");
+      vi.resetModules();
+    }
   });
 });
