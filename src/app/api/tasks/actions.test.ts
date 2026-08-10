@@ -88,6 +88,24 @@ describe("task action routes", () => {
     expect(submitted).toEqual([{ taskId: "task-1", runId: "run-1", requestId: "server-1", action: HumanInputAction.APPROVE }]);
   });
 
+  it("accepts structured answers only for a server-issued human-input request", async () => {
+    const submitted: unknown[] = [];
+    const handlers = createTaskHumanInputRouteHandlers({
+      findLatestRun: async () => ({ id: "run-1", taskId: "task-1", agent: "codex", status: AgentRunStatus.RUNNING, pid: 1, exitCode: null, error: null, logPath: null, startedAt: new Date(), finishedAt: null }),
+      submit: async (input) => { submitted.push(input); return { id: "audit-1" }; },
+    });
+
+    const response = await handlers.POST(new Request("http://localhost", {
+      method: "POST", body: JSON.stringify({ requestId: "server-questions", action: HumanInputAction.TEXT, answers: { approach: "Use the first option", scope: "Keep it focused" } }),
+    }), context);
+
+    expect(response.status).toBe(200);
+    expect(submitted).toEqual([{
+      taskId: "task-1", runId: "run-1", requestId: "server-questions", action: HumanInputAction.TEXT,
+      answers: { approach: "Use the first option", scope: "Keep it focused" },
+    }]);
+  });
+
   it("rejects browser-supplied protocol identifiers on human input", async () => {
     const handlers = createTaskHumanInputRouteHandlers({
       findLatestRun: async () => null,

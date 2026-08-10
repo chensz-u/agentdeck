@@ -6,14 +6,19 @@ import { useCallback, useEffect, useState } from "react";
 
 import { DiffViewer } from "../../../components/diff-viewer";
 import { EventFeed, type ActivityEvent } from "../../../components/event-feed";
+import { HumanInputCard } from "../../../components/human-input-card";
 import { StatusBadge } from "../../../components/status-badge";
 import { TaskActions } from "../../../components/task-actions";
+import { WorktreeCard } from "../../../components/worktree-card";
 import { TaskStatus } from "../../../lib/domain/types";
 
 type TaskDetail = {
   id: string; projectId: string; title: string; prompt: string; status: TaskStatus;
   run: { id: string; status: string; error: string | null } | null;
   changedPaths: string[]; diff: string;
+  review: { changedPaths: string[]; diff: string; commitSummary: string } | null;
+  worktree: { status: string; projectPath: string; baselineBranch: string; baselineSha: string; worktreePath: string; taskBranch: string; error: string | null; cleanupError: string | null } | null;
+  humanInputRequests: Array<{ requestId: string; deliveryStatus: string; deliveryError: string | null; payload: { kind: "CONFIRMATION" | "QUESTION" | "PERMISSIONS" | null; questions: Array<{ id: string; header: string; question: string; options: string[] }> } | null }>;
 };
 
 export default function TaskDetailClient({ taskId }: { taskId: string }) {
@@ -52,9 +57,11 @@ export default function TaskDetailClient({ taskId }: { taskId: string }) {
     <header className="topbar"><Link className="brand" href="/">AgentDeck</Link><nav aria-label="Primary navigation"><Link href="/projects">Projects</Link></nav></header>
     <Link className="back-link" href={`/projects/${detail.projectId}`}>← Project workspace</Link>
     <section className="project-hero task-hero"><p className="eyebrow">TASK DETAIL</p><h1>{detail.title}</h1><p>{detail.prompt}</p><StatusBadge status={detail.status} /></section>
-    <TaskActions taskId={detail.id} status={detail.status} runId={detail.run?.id ?? null} onChanged={load} onRetry={(id) => router.push(`/tasks/${id}`)} />
+    <TaskActions taskId={detail.id} status={detail.status} runId={detail.run?.id ?? null} hasWorktree={Boolean(detail.worktree)} onChanged={load} onRetry={(id) => router.push(`/tasks/${id}`)} />
     {detail.run?.error && <p className="form-error" role="alert">{detail.run.error}</p>}
+    <WorktreeCard worktree={detail.worktree} />
+    <HumanInputCard taskId={detail.id} requests={detail.humanInputRequests} onSubmitted={load} />
     <EventFeed events={events} />
-    <DiffViewer changedPaths={detail.changedPaths} diff={detail.diff} />
+    <DiffViewer changedPaths={detail.review?.changedPaths ?? detail.changedPaths} diff={detail.review?.diff ?? detail.diff} baselineBranch={detail.worktree?.baselineBranch} baselineSha={detail.worktree?.baselineSha} taskBranch={detail.worktree?.taskBranch} commitSummary={detail.review?.commitSummary} />
   </main>;
 }

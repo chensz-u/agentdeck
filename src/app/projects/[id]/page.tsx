@@ -38,7 +38,7 @@ export default function ProjectWorkspacePage() {
         <h1>{project?.name ?? "Loading project…"}</h1>
         {project && <p>{project.path}</p>}
       </section>
-      {project && <section className="surface" aria-labelledby="create-task-heading"><h2 id="create-task-heading">Create a task</h2><TaskCreateForm projectId={project.id} onCreated={(task) => setTasks((current) => [task, ...current])} /></section>}
+      {project && <section className="surface" aria-labelledby="create-task-heading"><h2 id="create-task-heading">Create a task</h2><TaskCreateForm projectId={project.id} projectIsGitRepository={project.isGitRepository} onCreated={(task) => setTasks((current) => [task, ...current])} /></section>}
       <section className="task-list" aria-labelledby="task-list-heading">
         <div className="section-label"><h2 id="task-list-heading">Task queue</h2><span>{tasks.length}</span></div>
         {project && tasks.length === 0 ? <p className="muted">No tasks yet. Add the first brief above.</p> : tasks.map((task) => (

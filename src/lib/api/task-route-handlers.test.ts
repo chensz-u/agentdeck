@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { HumanInputAction, HumanInputDeliveryStatus, TaskStatus, WorktreeStatus, type Task } from "../domain/types";
+import { ExecutionMode, HumanInputAction, HumanInputDeliveryStatus, TaskStatus, WorktreeStatus, type Task } from "../domain/types";
 import {
   createDashboardRouteHandlers,
   createTaskRouteHandlers,
@@ -98,6 +98,18 @@ describe("task API handlers", () => {
     await expect(response.json()).resolves.toMatchObject({ id: "task-1" });
   });
 
+  it("creates an isolated task only for a registered Git project", async () => {
+    const response = await createTaskRouteHandlers(new InMemoryTaskApiStore()).POST(
+      new Request("http://localhost/api/tasks", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: "project-1", title: "Isolate it", prompt: "Use a clean worktree.", executionMode: ExecutionMode.ISOLATED_WORKTREE }),
+      }),
+    );
+
+    expect(response.status).toBe(201);
+    await expect(response.json()).resolves.toMatchObject({ executionMode: ExecutionMode.ISOLATED_WORKTREE });
+  });
+
   it("returns sanitized isolated worktree, baseline review, and human-request metadata", async () => {
     const store = new InMemoryTaskApiStore([task({ status: TaskStatus.REVIEW })]);
     Object.assign(store, {
@@ -111,7 +123,7 @@ describe("task API handlers", () => {
       }),
       listHumanInputs: async () => [{
         id: "audit-1", sequence: 1, taskId: "task-1", runId: "run-1", action: HumanInputAction.REQUEST,
-        requestId: "request-1", payload: { kind: "QUESTION", threadId: "secret-thread", turnId: "secret-turn", questionIds: ["q-1"] },
+        requestId: "request-1", payload: { kind: "QUESTION", threadId: "secret-thread", turnId: "secret-turn", questionIds: ["q-1"], questions: [{ id: "q-1", header: "Approach", question: "Which approach?", options: ["A", "B"] }] },
         deliveryStatus: HumanInputDeliveryStatus.PENDING, deliveryError: null, createdAt: new Date(),
       }],
     });
@@ -120,11 +132,10 @@ describe("task API handlers", () => {
     const body = await response.json();
 
     expect(body).toMatchObject({
-      worktree: { id: "worktree-1", status: WorktreeStatus.READY, taskBranch: "agentdeck/task-task-1" },
+      worktree: { id: "worktree-1", status: WorktreeStatus.READY, taskBranch: "agentdeck/task-task-1", projectPath: "C:\\secret-project", worktreePath: "C:\\secret-project\\.agentdeck\\worktrees\\task-task-1" },
       review: { changedPaths: ["isolated.txt"], diff: "baseline diff" },
-      humanInputRequests: [{ requestId: "request-1", payload: { kind: "QUESTION", questionIds: ["q-1"] } }],
+      humanInputRequests: [{ requestId: "request-1", payload: { kind: "QUESTION", questionIds: ["q-1"], questions: [{ id: "q-1", header: "Approach", question: "Which approach?", options: ["A", "B"] }] } }],
     });
-    expect(JSON.stringify(body)).not.toContain("secret-project");
     expect(JSON.stringify(body)).not.toContain("secret-thread");
   });
 

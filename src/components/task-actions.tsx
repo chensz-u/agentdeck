@@ -4,10 +4,11 @@ import { useState } from "react";
 
 import { TaskStatus } from "../lib/domain/types";
 
-export function TaskActions({ taskId, status, runId, onChanged, onRetry }: {
+export function TaskActions({ taskId, status, runId, hasWorktree, onChanged, onRetry }: {
   taskId: string;
   status: TaskStatus;
   runId: string | null;
+  hasWorktree?: boolean;
   onChanged: () => Promise<void>;
   onRetry: (taskId: string) => void;
 }) {
@@ -33,8 +34,11 @@ export function TaskActions({ taskId, status, runId, onChanged, onRetry }: {
 
   return <section className="task-actions" aria-label="Task actions">
     {status === TaskStatus.TODO && <button disabled={pending} onClick={() => void request(`/api/tasks/${taskId}/run`).then(onChanged).catch(() => undefined)}>{pending ? "Starting…" : "Run task"}</button>}
-    {status === TaskStatus.RUNNING && runId && <button disabled={pending} onClick={() => void request(`/api/tasks/${taskId}/stop`, { runId }).then(onChanged).catch(() => undefined)}>{pending ? "Stopping…" : "Stop run"}</button>}
-    {[TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.REVIEW].includes(status) && <button disabled={pending} onClick={() => void request(`/api/tasks/${taskId}/retry`).then(async (response) => onRetry((await response.json() as { id: string }).id)).catch(() => undefined)}>{pending ? "Retrying…" : "Retry task"}</button>}
+    {[TaskStatus.RUNNING, TaskStatus.AWAITING_INPUT].includes(status) && runId && <button disabled={pending} onClick={() => void request(`/api/tasks/${taskId}/stop`, { runId }).then(onChanged).catch(() => undefined)}>{pending ? "Stopping…" : "Stop run"}</button>}
+    {[TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.REVIEW, TaskStatus.WORKTREE_FAILED].includes(status) && <button disabled={pending} onClick={() => void request(`/api/tasks/${taskId}/retry`).then(async (response) => onRetry((await response.json() as { id: string }).id)).catch(() => undefined)}>{pending ? "Retrying…" : "Retry task"}</button>}
+    {status === TaskStatus.REVIEW && <button disabled={pending} onClick={() => void request(`/api/tasks/${taskId}/merge-ready`).then(onChanged).catch(() => undefined)}>{pending ? "Updating…" : "Mark merge ready"}</button>}
+    {status === TaskStatus.MERGE_READY && <button disabled={pending} onClick={() => void request(`/api/tasks/${taskId}/done`).then(onChanged).catch(() => undefined)}>{pending ? "Updating…" : "Mark done"}</button>}
+    {hasWorktree && [TaskStatus.REVIEW, TaskStatus.MERGE_READY, TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.CANCELLED].includes(status) && <button className="secondary-button" disabled={pending} onClick={() => void request(`/api/tasks/${taskId}/clean-worktree`).then(onChanged).catch(() => undefined)}>{pending ? "Cleaning…" : "Clean worktree"}</button>}
     {error && <p className="form-error" role="alert">{error}</p>}
   </section>;
 }

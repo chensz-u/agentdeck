@@ -25,7 +25,7 @@ export type CodexHumanInputResponse = {
   runId: string;
   requestId: string;
   action: HumanInputAction.APPROVE | HumanInputAction.REJECT | HumanInputAction.TEXT;
-  text: string;
+  answers?: Record<string, string>;
 };
 
 /** Process boundary for Codex. Implementations do not know about tasks or storage. */

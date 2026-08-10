@@ -20,7 +20,7 @@ const stopSchema = z.object({ runId: z.string().trim().min(1) }).strict();
 const humanInputSchema = z.object({
   requestId: z.string().trim().min(1),
   action: z.enum([HumanInputAction.APPROVE, HumanInputAction.REJECT, HumanInputAction.TEXT]),
-  text: z.string().max(4_000).optional(),
+  answers: z.record(z.string().trim().min(1).max(4_000)).optional(),
 }).strict();
 
 export function createTaskRunRouteHandlers(service: RunTaskAction) {

@@ -64,6 +64,7 @@ describe("app-server protocol", () => {
       prompt: "Continue?",
       questionIds: ["choice"],
       options: ["Yes"],
+      questions: [{ id: "choice", header: "Choice", question: "Continue?", options: ["Yes"] }],
     });
 
     expect(normalizeAppServerHumanInputRequest({
@@ -181,16 +182,16 @@ describe("app-server protocol", () => {
     await expect(delivery).rejects.toThrow("app-server exited");
   });
 
-  it("answers a user-input request with its schema-shaped question answer map", async () => {
+  it("answers a user-input request with distinct schema-shaped answers for each question", async () => {
     const transport = new FakeTransport();
     const run = await beginAppServerRun(transport, { cwd: "C:\\fixture", prompt: "Do work" });
 
     const delivery = run.respondToHumanInput({
-      requestId: "43", rpcId: "43", kind: "QUESTION", threadId: "thread-1", turnId: "turn-1", prompt: "Choice?", questionIds: ["choice"],
-    }, { action: HumanInputAction.TEXT, text: "Yes" });
+      requestId: "43", rpcId: "43", kind: "QUESTION", threadId: "thread-1", turnId: "turn-1", prompt: "Choice?", questionIds: ["choice", "scope"],
+    }, { action: HumanInputAction.TEXT, answers: { choice: "Yes", scope: "Only this task" } });
 
     expect(transport.messages.at(-1)).toMatchObject({
-      jsonrpc: "2.0", id: "43", result: { answers: { choice: { answers: ["Yes"] } } },
+      jsonrpc: "2.0", id: "43", result: { answers: { choice: { answers: ["Yes"] }, scope: { answers: ["Only this task"] } } },
     });
     transport.emit({ jsonrpc: "2.0", method: "serverRequest/resolved", params: { requestId: "43", threadId: "thread-1" } });
     await delivery;

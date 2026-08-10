@@ -33,6 +33,7 @@ export type AppServerHumanInputRequest = {
   turnId: string;
   prompt: string;
   questionIds?: string[];
+  questions?: Array<{ id: string; header: string; question: string; options: string[] }>;
   options?: string[];
   permissions?: JsonRecord;
 };
@@ -64,7 +65,15 @@ export function normalizeAppServerHumanInputRequest(message: unknown): AppServer
     const options = questions.flatMap((question) => Array.isArray(question.options)
       ? question.options.filter(isRecord).map((option) => option.label).filter((label): label is string => typeof label === "string")
       : []);
-    return { ...session, requestId, rpcId: message.id, kind: "QUESTION", prompt: questions.map((question) => question.question as string).join("\n"), questionIds: questions.map((question) => question.id as string), ...(options.length ? { options } : {}) };
+    const normalizedQuestions = questions.map((question) => ({
+      id: question.id as string,
+      header: typeof question.header === "string" ? question.header : "Question",
+      question: question.question as string,
+      options: Array.isArray(question.options)
+        ? question.options.filter(isRecord).map((option) => option.label).filter((label): label is string => typeof label === "string")
+        : [],
+    }));
+    return { ...session, requestId, rpcId: message.id, kind: "QUESTION", prompt: normalizedQuestions.map((question) => question.question).join("\n"), questionIds: normalizedQuestions.map((question) => question.id), questions: normalizedQuestions, ...(options.length ? { options } : {}) };
   }
   if (message.method === "item/permissions/requestApproval" && isRecord(message.params.permissions)) {
     return { ...session, requestId, rpcId: message.id, kind: "PERMISSIONS", prompt: "Codex requests additional permissions.", permissions: message.params.permissions };
@@ -185,7 +194,7 @@ export async function beginAppServerRun(
         return await respondToServerRequest(inputRequest, { permissions: response.action === "APPROVE" ? inputRequest.permissions ?? {} : {} });
       }
       if (response.action !== "TEXT" || !inputRequest.questionIds?.length) throw new Error("Question requests require text");
-      const answers = Object.fromEntries(inputRequest.questionIds.map((questionId) => [questionId, { answers: [response.text] }]));
+      const answers = Object.fromEntries(inputRequest.questionIds.map((questionId) => [questionId, { answers: [response.answers?.[questionId] ?? ""] }]));
       await respondToServerRequest(inputRequest, { answers });
     },
     abortHumanInput: (error) => {

@@ -25,9 +25,9 @@ class FakeRepository {
 }
 
 class FakeAdapter {
-  readonly inputs: Array<{ runId: string; requestId: string; action: HumanInputAction; text: string }> = [];
+  readonly inputs: Array<{ runId: string; requestId: string; action: HumanInputAction; answers?: Record<string, string> }> = [];
   failure?: Error;
-  async respondToHumanInput(input: { runId: string; requestId: string; action: HumanInputAction; text: string }) {
+  async respondToHumanInput(input: { runId: string; requestId: string; action: HumanInputAction; answers?: Record<string, string> }) {
     this.inputs.push(input);
     if (this.failure) throw this.failure;
   }
@@ -51,7 +51,7 @@ describe("HumanInputService", () => {
     await service.submit({ taskId: "task-1", runId: "run-1", requestId: "server-1", action: HumanInputAction.APPROVE });
 
     expect(repository.entries).toMatchObject([{ action: HumanInputAction.REQUEST, requestId: "server-1", payload: { threadId: "thread-1", turnId: "turn-1" }, deliveryStatus: HumanInputDeliveryStatus.DELIVERED }]);
-    expect(adapter.inputs).toEqual([{ runId: "run-1", requestId: "server-1", action: HumanInputAction.APPROVE, text: "" }]);
+    expect(adapter.inputs).toEqual([{ runId: "run-1", requestId: "server-1", action: HumanInputAction.APPROVE }]);
     expect(repository.task.status).toBe(TaskStatus.RUNNING);
   });
 
@@ -59,7 +59,7 @@ describe("HumanInputService", () => {
     const { service } = createService();
     await service.recordRequest({ taskId: "task-1", runId: "run-1", request: question });
 
-    await expect(service.submit({ taskId: "task-1", runId: "run-1", requestId: "forged", action: HumanInputAction.TEXT, text: "yes" })).rejects.toThrow("not pending");
+    await expect(service.submit({ taskId: "task-1", runId: "run-1", requestId: "forged", action: HumanInputAction.TEXT, answers: { choice: "yes" } })).rejects.toThrow("not pending");
     await expect(service.submit({ taskId: "task-1", runId: "run-1", requestId: "server-2", action: HumanInputAction.APPROVE })).rejects.toThrow("requires text");
   });
 
@@ -70,7 +70,7 @@ describe("HumanInputService", () => {
     await service.submit({ taskId: "task-1", runId: "run-1", requestId: "server-3", action: HumanInputAction.APPROVE });
 
     expect(repository.entries[0]).toMatchObject({ payload: { kind: "PERMISSIONS", permissions: permissions.permissions } });
-    expect(adapter.inputs).toEqual([{ runId: "run-1", requestId: "server-3", action: HumanInputAction.APPROVE, text: "" }]);
+    expect(adapter.inputs).toEqual([{ runId: "run-1", requestId: "server-3", action: HumanInputAction.APPROVE }]);
   });
 
   it("retries an exact request id after a failed delivery but never redelivers a delivered response", async () => {
@@ -78,13 +78,22 @@ describe("HumanInputService", () => {
     await service.recordRequest({ taskId: "task-1", runId: "run-1", request: question });
     adapter.failure = new Error("connection lost");
 
-    await expect(service.submit({ taskId: "task-1", runId: "run-1", requestId: "server-2", action: HumanInputAction.TEXT, text: "yes" })).rejects.toThrow("recoverable");
+    await expect(service.submit({ taskId: "task-1", runId: "run-1", requestId: "server-2", action: HumanInputAction.TEXT, answers: { choice: "yes" } })).rejects.toThrow("recoverable");
     expect(repository.entries[0]).toMatchObject({ deliveryStatus: HumanInputDeliveryStatus.FAILED });
     adapter.failure = undefined;
-    await service.submit({ taskId: "task-1", runId: "run-1", requestId: "server-2", action: HumanInputAction.TEXT, text: "yes" });
-    await service.submit({ taskId: "task-1", runId: "run-1", requestId: "server-2", action: HumanInputAction.TEXT, text: "yes" });
+    await service.submit({ taskId: "task-1", runId: "run-1", requestId: "server-2", action: HumanInputAction.TEXT, answers: { choice: "yes" } });
+    await service.submit({ taskId: "task-1", runId: "run-1", requestId: "server-2", action: HumanInputAction.TEXT, answers: { choice: "yes" } });
     expect(adapter.inputs).toHaveLength(2);
     expect(repository.entries[0]).toMatchObject({ deliveryStatus: HumanInputDeliveryStatus.DELIVERED });
+  });
+
+  it("delivers exactly one bounded answer for each server-issued question", async () => {
+    const { adapter, service } = createService();
+    await service.recordRequest({ taskId: "task-1", runId: "run-1", request: { ...question, questionIds: ["choice", "scope"] } });
+
+    await service.submit({ taskId: "task-1", runId: "run-1", requestId: "server-2", action: HumanInputAction.TEXT, answers: { choice: "Yes", scope: "Narrowly" } });
+
+    expect(adapter.inputs).toEqual([{ runId: "run-1", requestId: "server-2", action: HumanInputAction.TEXT, answers: { choice: "Yes", scope: "Narrowly" } }]);
   });
 
   it("serializes concurrent cancellation and reply so no response is delivered after terminal state", async () => {

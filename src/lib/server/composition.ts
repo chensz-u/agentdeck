@@ -1,3 +1,7 @@
+import { execFileSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+
 import type { CodexAdapter, CodexHumanInputResponse, CodexRunRequest } from "../codex/codex-adapter";
 import { AppServerAdapter } from "../codex/app-server-adapter";
 import { ExecFallbackAdapter, FallbackCodexAdapter } from "../codex/exec-fallback-adapter";
@@ -26,6 +30,8 @@ export type ServerComposition = {
 
 class ControlledE2eAdapter implements CodexAdapter {
   private readonly completions = new Map<string, (result: { exitCode: number }) => void>();
+  private readonly isolatedRuns = new Set<string>();
+  private readonly runCwds = new Map<string, string>();
   private launches = 0;
 
   async launch(request: CodexRunRequest) {
@@ -34,7 +40,18 @@ class ControlledE2eAdapter implements CodexAdapter {
     const completed = new Promise<{ exitCode: number }>((resolve) => {
       this.completions.set(request.runId, resolve);
     });
-    if (this.launches > 1) setTimeout(() => this.completions.get(request.runId)?.({ exitCode: 0 }), 20);
+    if (request.cwd.includes(".agentdeck")) {
+      this.isolatedRuns.add(request.runId);
+      this.runCwds.set(request.runId, request.cwd);
+      await request.onEvent({ type: "human-input/requested", params: {
+        requestId: `e2e-input-${request.runId}`, rpcId: `e2e-input-${request.runId}`, kind: "QUESTION",
+        threadId: `e2e-thread-${request.runId}`, turnId: `e2e-turn-${request.runId}`, prompt: "Choose the controlled test response.",
+        questionIds: ["approach", "scope"], questions: [
+          { id: "approach", header: "Approach", question: "Which approach should the task take?", options: ["Contained"] },
+          { id: "scope", header: "Scope", question: "What scope should the task use?", options: ["Only this task"] },
+        ],
+      } });
+    } else if (this.launches > 1) setTimeout(() => this.completions.get(request.runId)?.({ exitCode: 0 }), 20);
     return { pid: 0, completed };
   }
 
@@ -44,6 +61,15 @@ class ControlledE2eAdapter implements CodexAdapter {
 
   async respondToHumanInput(input: CodexHumanInputResponse): Promise<void> {
     if (!this.completions.has(input.runId)) throw new Error(`Run ${input.runId} is not active`);
+    if (this.isolatedRuns.has(input.runId)) {
+      const cwd = this.runCwds.get(input.runId);
+      if (!cwd) throw new Error(`Run ${input.runId} has no isolated workspace`);
+      writeFileSync(join(cwd, "staged.txt"), "staged review fixture\n");
+      execFileSync("git", ["add", "staged.txt"], { cwd, stdio: "ignore" });
+      writeFileSync(join(cwd, "unstaged.txt"), "unstaged review fixture\n");
+      writeFileSync(join(cwd, "untracked.txt"), "untracked review fixture\n");
+      setTimeout(() => this.completions.get(input.runId)?.({ exitCode: 0 }), 20);
+    }
   }
 }
 
