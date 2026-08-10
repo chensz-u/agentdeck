@@ -1,10 +1,11 @@
-import type { CodexAdapter, CodexContinuation, CodexHumanInputResponse, CodexRunRequest } from "../codex/codex-adapter";
+import type { CodexAdapter, CodexHumanInputResponse, CodexRunRequest } from "../codex/codex-adapter";
 import { AppServerAdapter } from "../codex/app-server-adapter";
 import { ExecFallbackAdapter, FallbackCodexAdapter } from "../codex/exec-fallback-adapter";
 import { GitService } from "../services/git-service";
 import { RunEventBus } from "../services/run-event-bus";
 import { RunEventStore } from "../services/run-event-store";
 import { RunService } from "../services/run-service";
+import { HumanInputService } from "../services/human-input-service";
 import { TaskService } from "../services/task-service";
 import { LocalRepository } from "./local-repository";
 
@@ -12,6 +13,7 @@ export type ServerComposition = {
   repository: LocalRepository;
   taskService: TaskService;
   runService: RunService;
+  humanInputService: HumanInputService;
   runEventBus: RunEventBus;
   runEventStore: RunEventStore;
 };
@@ -34,9 +36,8 @@ class ControlledE2eAdapter implements CodexAdapter {
     this.completions.get(runId)?.({ exitCode: 0 });
   }
 
-  async continueHumanInput(input: CodexHumanInputResponse): Promise<CodexContinuation> {
+  async respondToHumanInput(input: CodexHumanInputResponse): Promise<void> {
     if (!this.completions.has(input.runId)) throw new Error(`Run ${input.runId} is not active`);
-    return { threadId: "e2e-thread", turnId: "e2e-turn", mode: "steer" };
   }
 }
 
@@ -44,17 +45,21 @@ function createServerComposition(): ServerComposition {
   const repository = new LocalRepository(process.env.AGENTDECK_DATA_PATH || undefined);
   const runEventBus = new RunEventBus();
   const runEventStore = new RunEventStore({ bus: runEventBus });
+  const adapter: CodexAdapter = process.env.AGENTDECK_E2E_STUB === "1"
+    ? new ControlledE2eAdapter()
+    : new FallbackCodexAdapter(new AppServerAdapter(), new ExecFallbackAdapter());
+  const humanInputService = new HumanInputService({ repository, adapter });
   return {
     repository,
     taskService: new TaskService(repository),
     runService: new RunService({
       repository,
-      adapter: process.env.AGENTDECK_E2E_STUB === "1"
-        ? new ControlledE2eAdapter()
-        : new FallbackCodexAdapter(new AppServerAdapter(), new ExecFallbackAdapter()),
+      adapter,
       events: runEventStore,
       git: new GitService(),
+      humanInput: humanInputService,
     }),
+    humanInputService,
     runEventBus,
     runEventStore,
   };

@@ -1,5 +1,7 @@
 import { AgentRunStatus, TaskStatus, type AgentRun, type Project, type Task } from "../domain/types";
 import type { CodexAdapter, CodexRunCompletion } from "../codex/codex-adapter";
+import type { AppServerHumanInputRequest } from "../codex/app-server-adapter";
+import type { HumanInputRequestRecord } from "./human-input-service";
 import type { RunEventInput } from "./run-event-store";
 
 export interface RunLifecycleRepository {
@@ -26,6 +28,11 @@ export type RunGitService = {
   getDiff(project: Pick<Project, "path" | "gitEnabled">): Promise<string>;
 };
 
+export type RunHumanInputLifecycle = {
+  recordRequest(input: HumanInputRequestRecord): Promise<unknown>;
+  markTerminal(runId: string): Promise<void>;
+};
+
 type ActiveRun = {
   task: Task;
   project: Project;
@@ -38,6 +45,7 @@ type RunServiceOptions = {
   adapter: CodexAdapter;
   events: RunEventWriter;
   git: RunGitService;
+  humanInput?: RunHumanInputLifecycle;
   now?: () => Date;
 };
 
@@ -68,6 +76,13 @@ export class RunService {
         prompt: context.task.prompt,
         cwd: context.project.path,
         onEvent: async (event) => {
+          if (event.type === "human-input/requested") {
+            await this.options.humanInput?.recordRequest({
+              taskId: context.task.id,
+              runId: run.id,
+              request: event.params as AppServerHumanInputRequest,
+            });
+          }
           await this.options.events.append(run.id, event);
         },
       });
@@ -96,6 +111,7 @@ export class RunService {
   async stop(runId: string): Promise<void> {
     const active = this.active.get(runId);
     if (!active) throw new Error(`Run ${runId} is not active`);
+    await this.options.humanInput?.markTerminal(runId);
     active.cancelled = true;
     await this.options.events.append(runId, { type: "run/cancelling", params: {} });
     await this.options.adapter.stop(runId);
@@ -116,6 +132,7 @@ export class RunService {
   }
 
   private async finalize(run: AgentRun, active: ActiveRun, result: CodexRunCompletion): Promise<void> {
+    await this.options.humanInput?.markTerminal(run.id);
     const finishedAt = this.now();
     let runStatus = AgentRunStatus.FAILED;
     let taskStatus = TaskStatus.FAILED;

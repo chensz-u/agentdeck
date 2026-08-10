@@ -7,6 +7,7 @@ import {
   AgentRunStatus,
   ExecutionMode,
   HumanInputAction,
+  HumanInputDeliveryStatus,
   RunInputState,
   TaskStatus,
   WorktreeStatus,
@@ -229,6 +230,13 @@ export class LocalRepository implements ProjectStore, TaskApiStore, RunLifecycle
     });
   }
 
+  async findInputContext(taskId: string, runId: string): Promise<{ task: Task; run: AgentRun } | null> {
+    await this.writeQueue;
+    const task = this.data.tasks.find((candidate) => candidate.id === taskId);
+    const run = this.data.runs.find((candidate) => candidate.id === runId && candidate.taskId === taskId);
+    return task && run ? { task: asTask(task), run: asRun(run) } : null;
+  }
+
   /** Bypasses the public state machine for restart recovery and explicit operator repair. */
   async forceTaskStatus(taskId: string, status: TaskStatus): Promise<void> {
     await this.mutate(() => {
@@ -324,7 +332,7 @@ export class LocalRepository implements ProjectStore, TaskApiStore, RunLifecycle
     });
   }
 
-  async appendHumanInput(input: Omit<HumanInputAuditEntry, "id" | "sequence" | "createdAt">): Promise<HumanInputAuditEntry> {
+  async appendHumanInput(input: Omit<HumanInputAuditEntry, "id" | "sequence" | "createdAt" | "deliveryStatus" | "deliveryError"> & Partial<Pick<HumanInputAuditEntry, "deliveryStatus" | "deliveryError">>): Promise<HumanInputAuditEntry> {
     return this.mutate(() => {
       if (!Object.values(HumanInputAction).includes(input.action)) {
         throw new Error(`Unsupported human input action: ${input.action}`);
@@ -333,12 +341,23 @@ export class LocalRepository implements ProjectStore, TaskApiStore, RunLifecycle
       if (existing) return asHumanInput(existing);
       const entry: StoredHumanInput = {
         ...input,
+        deliveryStatus: input.deliveryStatus ?? (input.action === HumanInputAction.REQUEST ? HumanInputDeliveryStatus.PENDING : HumanInputDeliveryStatus.DELIVERED),
+        deliveryError: input.deliveryError ?? null,
         id: randomUUID(),
         sequence: (this.data.humanInputs.at(-1)?.sequence ?? 0) + 1,
         createdAt: new Date().toISOString(),
       };
       this.data.humanInputs.push(entry);
       return asHumanInput(entry);
+    });
+  }
+
+  async updateHumanInputDelivery(runId: string, requestId: string, status: HumanInputDeliveryStatus, error: string | null): Promise<void> {
+    await this.mutate(() => {
+      const entry = this.data.humanInputs.find((candidate) => candidate.runId === runId && candidate.requestId === requestId);
+      if (!entry) throw new Error(`Human input request ${requestId} was not found for run ${runId}`);
+      entry.deliveryStatus = status;
+      entry.deliveryError = error;
     });
   }
 
@@ -381,12 +400,17 @@ export class LocalRepository implements ProjectStore, TaskApiStore, RunLifecycle
         })),
         diffs: data.diffs,
         worktrees: storedWorktrees,
-        humanInputs: Array.isArray(data.humanInputs) ? data.humanInputs : [],
+        humanInputs: Array.isArray(data.humanInputs) ? data.humanInputs.map((input) => ({
+          ...input,
+          deliveryStatus: input.deliveryStatus ?? (input.action === HumanInputAction.REQUEST ? HumanInputDeliveryStatus.PENDING : HumanInputDeliveryStatus.DELIVERED),
+          deliveryError: input.deliveryError ?? null,
+        })) : [],
       };
       const migrated = !Array.isArray(data.worktrees) || !Array.isArray(data.humanInputs)
         || data.tasks.some((task) => task.executionMode === undefined)
         || data.tasks.some((task) => task.worktreeId === undefined)
-        || data.runs.some((run) => run.threadId === undefined || run.turnId === undefined || run.inputState === undefined);
+        || data.runs.some((run) => run.threadId === undefined || run.turnId === undefined || run.inputState === undefined)
+        || data.humanInputs?.some((input) => input.deliveryStatus === undefined || input.deliveryError === undefined);
       const reconciled = this.reconcileInterruptedWork(loaded);
       if (migrated || reconciled) this.writeSynchronously(loaded);
       return loaded;
@@ -398,6 +422,7 @@ export class LocalRepository implements ProjectStore, TaskApiStore, RunLifecycle
   private reconcileInterruptedWork(data: StoredData): boolean {
     const now = new Date().toISOString();
     const interruptedTaskIds = new Set<string>();
+    let changed = false;
     for (const run of data.runs) {
       if (run.status !== AgentRunStatus.RUNNING) continue;
       run.status = AgentRunStatus.FAILED;
@@ -405,7 +430,14 @@ export class LocalRepository implements ProjectStore, TaskApiStore, RunLifecycle
       run.finishedAt = now;
       interruptedTaskIds.add(run.taskId);
     }
-    let changed = interruptedTaskIds.size > 0;
+    for (const input of data.humanInputs) {
+      if (input.deliveryStatus !== HumanInputDeliveryStatus.PENDING) continue;
+      input.deliveryStatus = HumanInputDeliveryStatus.FAILED;
+      input.deliveryError = restartError;
+      interruptedTaskIds.add(input.taskId);
+      changed = true;
+    }
+    changed = changed || interruptedTaskIds.size > 0;
     for (const task of data.tasks) {
       const active = task.status === TaskStatus.RUNNING
         || task.status === TaskStatus.CREATING_WORKTREE

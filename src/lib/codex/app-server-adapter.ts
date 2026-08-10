@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 
 import { parseCodexEvent } from "./protocol";
-import type { CodexAdapter, CodexContinuation, CodexHumanInputResponse, CodexRunCompletion, CodexRunHandle, CodexRunRequest } from "./codex-adapter";
+import type { CodexAdapter, CodexHumanInputResponse, CodexRunCompletion, CodexRunHandle, CodexRunRequest } from "./codex-adapter";
 import type { CodexEvent } from "./protocol";
 
 type JsonRecord = Record<string, unknown>;
@@ -27,10 +27,12 @@ export function normalizeAppServerNotification(message: unknown): CodexEvent | n
 
 export type AppServerHumanInputRequest = {
   requestId: string;
+  rpcId: string | number;
   kind: "CONFIRMATION" | "QUESTION";
   threadId: string;
   turnId: string;
   prompt: string;
+  questionIds?: string[];
   options?: string[];
 };
 
@@ -45,22 +47,18 @@ export function normalizeAppServerHumanInputRequest(message: unknown): AppServer
   if (!isRecord(message) || typeof message.method !== "string" || !isRecord(message.params)) return null;
   const session = readSession(message.params);
   if (!session) return null;
-  const requestId = typeof message.id === "string" || typeof message.id === "number"
-    ? String(message.id)
-    : typeof message.params.approvalId === "string"
-      ? message.params.approvalId
-      : typeof message.params.itemId === "string" ? message.params.itemId : null;
-  if (!requestId) return null;
+  if (typeof message.id !== "string" && typeof message.id !== "number") return null;
+  const requestId = String(message.id);
   if (message.method === "item/tool/requestUserInput" && Array.isArray(message.params.questions)) {
     const questions = message.params.questions.filter(isRecord);
-    if (!questions.length || questions.some((question) => typeof question.question !== "string")) return null;
+    if (!questions.length || questions.some((question) => typeof question.question !== "string" || typeof question.id !== "string")) return null;
     const options = questions.flatMap((question) => Array.isArray(question.options)
       ? question.options.filter(isRecord).map((option) => option.label).filter((label): label is string => typeof label === "string")
       : []);
-    return { ...session, requestId, kind: "QUESTION", prompt: questions.map((question) => question.question as string).join("\n"), ...(options.length ? { options } : {}) };
+    return { ...session, requestId, rpcId: message.id, kind: "QUESTION", prompt: questions.map((question) => question.question as string).join("\n"), questionIds: questions.map((question) => question.id as string), ...(options.length ? { options } : {}) };
   }
   if (["item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval"].includes(message.method)) {
-    return { ...session, requestId, kind: "CONFIRMATION", prompt: "Codex requests approval to continue." };
+    return { ...session, requestId, rpcId: message.id, kind: "CONFIRMATION", prompt: "Codex requests approval to continue." };
   }
   return null;
 }
@@ -91,7 +89,7 @@ export interface AppServerTransport {
 export type AppServerRun = {
   completed: Promise<CodexRunCompletion>;
   interrupt(): Promise<void>;
-  continue(text: string): Promise<CodexContinuation>;
+  respondToHumanInput(request: AppServerHumanInputRequest, response: Omit<CodexHumanInputResponse, "runId" | "requestId">): Promise<void>;
 };
 
 /** Performs the protocol handshake; launch only succeeds after `turn/start` responds. */
@@ -149,22 +147,21 @@ export async function beginAppServerRun(
   return {
     completed,
     interrupt: async () => { await request("turn/interrupt", { threadId, turnId }); },
-    continue: async (text) => {
-      try {
-        await request("turn/steer", { threadId, expectedTurnId: turnId, input: [{ type: "text", text }] });
-        return { threadId, turnId, mode: "steer" };
-      } catch {
-        const response = await request("turn/start", { threadId, input: [{ type: "text", text }] });
-        const turn = isRecord(response) && isRecord(response.turn) ? response.turn : undefined;
-        if (turn && typeof turn.id === "string") turnId = turn.id;
-        return { threadId, turnId, mode: "start" };
+    respondToHumanInput: async (inputRequest, response) => {
+      if (inputRequest.kind === "CONFIRMATION") {
+        if (response.action !== "APPROVE" && response.action !== "REJECT") throw new Error("Confirmation requests require approve or reject");
+        transport.send({ jsonrpc: "2.0", id: inputRequest.rpcId, result: { decision: response.action === "APPROVE" ? "accept" : "decline" } });
+        return;
       }
+      if (response.action !== "TEXT" || !inputRequest.questionIds?.length) throw new Error("Question requests require text");
+      const answers = Object.fromEntries(inputRequest.questionIds.map((questionId) => [questionId, { answers: [response.text] }]));
+      transport.send({ jsonrpc: "2.0", id: inputRequest.rpcId, result: { answers } });
     },
   };
 }
 
 type AppServerAdapterOptions = { command?: string; startupTimeoutMs?: number };
-type ManagedProcess = { process: ChildProcessWithoutNullStreams; interrupt(): Promise<void>; continue(text: string): Promise<CodexContinuation> };
+type ManagedProcess = { process: ChildProcessWithoutNullStreams; interrupt(): Promise<void>; pendingInputs: Map<string, AppServerHumanInputRequest>; respond(input: CodexHumanInputResponse): Promise<void> };
 
 /** Supervises a complete app-server JSON-RPC turn, not merely a spawned process. */
 export class AppServerAdapter implements CodexAdapter {
@@ -182,6 +179,7 @@ export class AppServerAdapter implements CodexAdapter {
     let stderr = "";
     let buffer = "";
     let receive: ((message: unknown) => void) | undefined;
+    const pendingInputs = new Map<string, AppServerHumanInputRequest>();
     const transport: AppServerTransport = {
       send: (message) => child.stdin.write(`${JSON.stringify(message)}\n`),
       onMessage: (listener) => { receive = listener; },
@@ -196,7 +194,10 @@ export class AppServerAdapter implements CodexAdapter {
           const message = JSON.parse(line);
           receive?.(message);
           const inputRequest = normalizeAppServerHumanInputRequest(message);
-          if (inputRequest) void Promise.resolve(request.onEvent({ type: "human-input/requested", params: inputRequest }));
+          if (inputRequest) {
+            pendingInputs.set(inputRequest.requestId, inputRequest);
+            void Promise.resolve(request.onEvent({ type: "human-input/requested", params: inputRequest }));
+          }
           const event = normalizeAppServerNotification(message);
           if (event) void Promise.resolve(request.onEvent(event));
         } catch { void Promise.resolve(request.onEvent({ type: "codex/invalid-json-rpc", params: { line } })); }
@@ -218,7 +219,17 @@ export class AppServerAdapter implements CodexAdapter {
       disposeAppServerChild(child);
       throw error;
     }
-    this.processes.set(request.runId, { process: child, interrupt: protocol.interrupt, continue: protocol.continue });
+    this.processes.set(request.runId, {
+      process: child,
+      interrupt: protocol.interrupt,
+      pendingInputs,
+      respond: async (input) => {
+        const pending = pendingInputs.get(input.requestId);
+        if (!pending) throw new Error(`Human input request ${input.requestId} is not pending for run ${input.runId}`);
+        await protocol.respondToHumanInput(pending, input);
+        pendingInputs.delete(input.requestId);
+      },
+    });
     const completed = Promise.race([protocol.completed, processExit]);
     completed.finally(() => { this.processes.delete(request.runId); if (!child.killed) child.kill(); }).catch(() => undefined);
     return { pid: child.pid ?? null, completed };
@@ -231,11 +242,11 @@ export class AppServerAdapter implements CodexAdapter {
     if (!managed.process.killed) managed.process.kill();
   }
 
-  async continueHumanInput(input: CodexHumanInputResponse): Promise<CodexContinuation> {
+  async respondToHumanInput(input: CodexHumanInputResponse): Promise<void> {
     const managed = this.processes.get(input.runId);
     if (!managed || managed.process.killed) {
       throw new Error(`App-server connection for run ${input.runId} is unavailable; restart the task to recover.`);
     }
-    return managed.continue(input.text);
+    await managed.respond(input);
   }
 }

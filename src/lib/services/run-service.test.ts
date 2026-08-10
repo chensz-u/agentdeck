@@ -7,7 +7,7 @@ import {
   type Project,
   type Task,
 } from "../domain/types";
-import type { CodexAdapter, CodexContinuation, CodexHumanInputResponse, CodexRunRequest } from "../codex/codex-adapter";
+import type { CodexAdapter, CodexHumanInputResponse, CodexRunRequest } from "../codex/codex-adapter";
 import { RunService, type RunLifecycleRepository } from "./run-service";
 
 function task(overrides: Partial<Task> = {}): Task {
@@ -106,6 +106,13 @@ class MemoryEvents {
   }
 }
 
+class FakeHumanInput {
+  readonly requests: unknown[] = [];
+  readonly terminals: string[] = [];
+  async recordRequest(input: unknown): Promise<void> { this.requests.push(input); }
+  async markTerminal(runId: string): Promise<void> { this.terminals.push(runId); }
+}
+
 class FakeAdapter implements CodexAdapter {
   requests: CodexRunRequest[] = [];
   stopped: string[] = [];
@@ -125,7 +132,7 @@ class FakeAdapter implements CodexAdapter {
     this.stopped.push(runId);
   }
 
-  async continueHumanInput(_input: CodexHumanInputResponse): Promise<CodexContinuation> {
+  async respondToHumanInput(_input: CodexHumanInputResponse): Promise<void> {
     throw new Error("Human input is not configured for this fake");
   }
 
@@ -158,6 +165,25 @@ describe("RunService", () => {
       type: "item/started",
       params: { item: "work" },
     });
+  });
+
+  it("routes a server-originated input request into the shared human-input lifecycle before it is streamed", async () => {
+    const adapter = new FakeAdapter();
+    const repository = new InMemoryRunRepository();
+    const events = new MemoryEvents();
+    const humanInput = new FakeHumanInput();
+    const service = new RunService({
+      repository, adapter, events,
+      git: { getChangedPaths: async () => [], getDiff: async () => "" },
+      humanInput,
+    } as never);
+
+    const run = await service.launch("task-1");
+    await adapter.requests[0].onEvent({ type: "human-input/requested", params: { requestId: "server-1", kind: "CONFIRMATION" } });
+
+    expect(humanInput.requests).toEqual([{ taskId: "task-1", runId: run.id, request: { requestId: "server-1", kind: "CONFIRMATION" } }]);
+    await service.stop(run.id);
+    expect(humanInput.terminals).toEqual([run.id]);
   });
 
   it("allows only one concurrent launch for a TODO task", async () => {
@@ -217,7 +243,7 @@ describe("RunService", () => {
     const adapter: CodexAdapter = {
       launch: async () => { throw new Error("app-server and fallback unavailable"); },
       stop: async () => undefined,
-      continueHumanInput: async () => { throw new Error("unavailable"); },
+      respondToHumanInput: async () => { throw new Error("unavailable"); },
     };
     const { repository, service } = createService(adapter as FakeAdapter);
 

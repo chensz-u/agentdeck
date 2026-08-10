@@ -8,6 +8,7 @@ import {
   AgentRunStatus,
   ExecutionMode,
   HumanInputAction,
+  HumanInputDeliveryStatus,
   RunInputState,
   TaskStatus,
   WorktreeStatus,
@@ -145,10 +146,10 @@ describe("LocalRepository V2 persistence", () => {
       threadId: "thread-1", turnId: "turn-1", inputState: RunInputState.AWAITING_INPUT,
     });
     const first = await repository.appendHumanInput({
-      taskId: task.id, runId: run.id, action: HumanInputAction.REQUEST, requestId: "request-1", payload: { question: "Proceed?" },
+      taskId: task.id, runId: run.id, action: HumanInputAction.REQUEST, requestId: "request-1", payload: { question: "Proceed?" }, deliveryStatus: HumanInputDeliveryStatus.PENDING, deliveryError: null,
     });
     const second = await repository.appendHumanInput({
-      taskId: task.id, runId: run.id, action: HumanInputAction.APPROVE, requestId: "request-2", payload: { answer: "yes" },
+      taskId: task.id, runId: run.id, action: HumanInputAction.APPROVE, requestId: "request-2", payload: { answer: "yes" }, deliveryStatus: HumanInputDeliveryStatus.DELIVERED, deliveryError: null,
     });
 
     expect(await repository.findWorktreeByTaskId(task.id)).toMatchObject({ id: worktree.id, baselineSha: "abc123" });
@@ -157,8 +158,30 @@ describe("LocalRepository V2 persistence", () => {
       threadId: "thread-1", turnId: "turn-1", inputState: RunInputState.AWAITING_INPUT,
     });
     expect(await repository.listHumanInputs(run.id)).toMatchObject([
-      { sequence: 1, id: first.id, requestId: "request-1" },
+      { sequence: 1, id: first.id, requestId: "request-1", deliveryStatus: HumanInputDeliveryStatus.PENDING },
       { sequence: 2, id: second.id, requestId: "request-2" },
+    ]);
+  });
+
+  it("updates persisted delivery state and fails stranded pending input on restart", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "agentdeck-local-repository-"));
+    temporaryDirectories.push(directory);
+    const repository = new LocalRepository(join(directory, "data.json"));
+    const project = await repository.createProject({ name: "Fixture", path: directory, isGitRepository: true });
+    const task = await repository.createTask({ projectId: project.id, parentTaskId: null, title: "V2", prompt: "Audit", status: TaskStatus.TODO });
+    const run = await repository.claimTaskRun(task.id, { agent: "codex", status: AgentRunStatus.RUNNING, pid: null, exitCode: null, error: null, logPath: null });
+    await repository.updateTaskStatus(task.id, TaskStatus.AWAITING_INPUT);
+    await repository.updateRunSession(run.run.id, { inputState: RunInputState.AWAITING_INPUT });
+    await repository.appendHumanInput({ taskId: task.id, runId: run.run.id, action: HumanInputAction.REQUEST, requestId: "request-1", payload: {}, deliveryStatus: HumanInputDeliveryStatus.PENDING, deliveryError: null });
+    await repository.updateHumanInputDelivery(run.run.id, "request-1", HumanInputDeliveryStatus.DELIVERED, null);
+    await repository.appendHumanInput({ taskId: task.id, runId: run.run.id, action: HumanInputAction.REQUEST, requestId: "request-2", payload: {}, deliveryStatus: HumanInputDeliveryStatus.PENDING, deliveryError: null });
+
+    expect((await repository.listHumanInputs(run.run.id))[0]).toMatchObject({ deliveryStatus: HumanInputDeliveryStatus.DELIVERED, deliveryError: null });
+    const restarted = new LocalRepository(join(directory, "data.json"));
+    await expect(restarted.findTask(task.id)).resolves.toMatchObject({ status: TaskStatus.FAILED });
+    await expect(restarted.listHumanInputs(run.run.id)).resolves.toMatchObject([
+      { requestId: "request-1", deliveryStatus: HumanInputDeliveryStatus.DELIVERED },
+      { requestId: "request-2", deliveryStatus: HumanInputDeliveryStatus.FAILED },
     ]);
   });
 

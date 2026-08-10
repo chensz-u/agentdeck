@@ -39,6 +39,12 @@ export enum HumanInputAction {
   TEXT = "TEXT",
 }
 
+export enum HumanInputDeliveryStatus {
+  PENDING = "PENDING",
+  DELIVERED = "DELIVERED",
+  FAILED = "FAILED",
+}
+
 export enum AgentRunStatus {
   RUNNING = "RUNNING",
   SUCCEEDED = "SUCCEEDED",
@@ -111,5 +117,7 @@ export type HumanInputAuditEntry = {
   action: HumanInputAction;
   requestId: string;
   payload: unknown;
+  deliveryStatus: HumanInputDeliveryStatus;
+  deliveryError: string | null;
   createdAt: Date;
 };

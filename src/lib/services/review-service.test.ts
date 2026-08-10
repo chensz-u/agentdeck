@@ -182,10 +182,10 @@ describe("ReviewService", () => {
     const repository = new MemoryReviewRepository(fixtureTask(), fixtureProject(projectPath), worktree);
     const service = new ReviewService({ repository });
 
-    repository.worktree.baselineSha = "--no-index";
+    worktree.baselineSha = "--no-index";
     await expect(service.getReview("task-1")).rejects.toThrow("baseline SHA is not a valid Git object ID");
 
-    repository.worktree.baselineSha = "f".repeat(40);
+    worktree.baselineSha = "f".repeat(40);
     await expect(service.getReview("task-1")).rejects.toThrow("baseline SHA does not resolve to a commit");
   });
 

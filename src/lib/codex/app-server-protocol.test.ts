@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 
+import { HumanInputAction } from "../domain/types";
+
 import {
   beginAppServerRun,
   disposeAppServerChild,
@@ -27,7 +29,6 @@ class FakeTransport implements AppServerTransport {
     if (message.method === "turn/start") {
       this.emit({ jsonrpc: "2.0", id: message.id, result: { turn: { id: "turn-1" } } });
     }
-    if (message.method === "turn/steer") this.emit({ jsonrpc: "2.0", id: message.id, result: {} });
     if (message.method === "turn/interrupt") this.emit({ jsonrpc: "2.0", id: message.id, result: {} });
   }
 
@@ -56,14 +57,18 @@ describe("app-server protocol", () => {
       },
     })).toEqual({
       requestId: "42",
+      rpcId: 42,
       kind: "QUESTION",
       threadId: "thread-1",
       turnId: "turn-1",
       prompt: "Continue?",
+      questionIds: ["choice"],
       options: ["Yes"],
     });
 
     expect(normalizeAppServerHumanInputRequest({
+      jsonrpc: "2.0",
+      id: "approval-2",
       method: "item/commandExecution/requestApproval",
       params: { threadId: "thread-1", turnId: "turn-1", itemId: "item-2", approvalId: "approval-2" },
     })).toMatchObject({
@@ -128,21 +133,29 @@ describe("app-server protocol", () => {
     });
   });
 
-  it("continues on the original thread, steering an active turn then starting a new turn when steering is rejected", async () => {
+  it("responds to the exact inbound approval request id with the schema-shaped decision", async () => {
     const transport = new FakeTransport();
     const run = await beginAppServerRun(transport, { cwd: "C:\\fixture", prompt: "Do work" });
 
-    await expect(run.continue("Approved")).resolves.toEqual({ threadId: "thread-1", turnId: "turn-1", mode: "steer" });
-    expect(transport.messages.at(-1)).toMatchObject({
-      method: "turn/steer",
-      params: { threadId: "thread-1", expectedTurnId: "turn-1", input: [{ type: "text", text: "Approved" }] },
-    });
+    await run.respondToHumanInput({
+      requestId: "42", rpcId: 42, kind: "CONFIRMATION", threadId: "thread-1", turnId: "turn-1", prompt: "Approve?",
+    }, { action: HumanInputAction.APPROVE, text: "" });
 
-    transport.failMethod = "turn/steer";
-    await expect(run.continue("Rejected")).resolves.toEqual({ threadId: "thread-1", turnId: "turn-1", mode: "start" });
     expect(transport.messages.at(-1)).toMatchObject({
-      method: "turn/start",
-      params: { threadId: "thread-1", input: [{ type: "text", text: "Rejected" }] },
+      jsonrpc: "2.0", id: 42, result: { decision: "accept" },
+    });
+  });
+
+  it("answers a user-input request with its schema-shaped question answer map", async () => {
+    const transport = new FakeTransport();
+    const run = await beginAppServerRun(transport, { cwd: "C:\\fixture", prompt: "Do work" });
+
+    await run.respondToHumanInput({
+      requestId: "43", rpcId: "43", kind: "QUESTION", threadId: "thread-1", turnId: "turn-1", prompt: "Choice?", questionIds: ["choice"],
+    }, { action: HumanInputAction.TEXT, text: "Yes" });
+
+    expect(transport.messages.at(-1)).toMatchObject({
+      jsonrpc: "2.0", id: "43", result: { answers: { choice: { answers: ["Yes"] } } },
     });
   });
 
@@ -152,7 +165,7 @@ describe("app-server protocol", () => {
       {
         launch: async () => { throw new Error("initialize rejected"); },
         stop: async () => undefined,
-        continueHumanInput: async () => { throw new Error("unavailable"); },
+        respondToHumanInput: async () => { throw new Error("unavailable"); },
       },
       {
         launch: async (request) => {
@@ -160,7 +173,7 @@ describe("app-server protocol", () => {
           return { pid: 4, completed: Promise.resolve({ exitCode: 0 }) };
         },
         stop: async () => undefined,
-        continueHumanInput: async () => { throw new Error("unavailable"); },
+        respondToHumanInput: async () => { throw new Error("unavailable"); },
       },
     );
     const events: string[] = [];
