@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   AgentRunStatus,
+  ExecutionMode,
   TaskStatus,
   type AgentRun,
   type Task,
@@ -93,6 +94,19 @@ describe("TaskService.createRetryTask", () => {
     expect(repository.tasks).toHaveLength(2);
     expect(repository.tasks[0]).toEqual(original);
     expect(repository.runs).toEqual([priorRun]);
+  });
+
+  it("makes a fresh isolated retry after a worktree failure without reusing worktree metadata", async () => {
+    const original = task({
+      status: TaskStatus.WORKTREE_FAILED,
+      executionMode: ExecutionMode.ISOLATED_WORKTREE,
+      worktreeId: "worktree-original",
+    });
+    const repository = new InMemoryTaskRepository([original]);
+
+    const retry = await new TaskService(repository).createRetryTask(original.id);
+
+    expect(retry).toMatchObject({ executionMode: ExecutionMode.ISOLATED_WORKTREE, worktreeId: null, status: TaskStatus.TODO });
   });
 
   it("rejects a retry request for an unknown task", async () => {

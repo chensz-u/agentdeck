@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   AgentRunStatus,
+  ExecutionMode,
   TaskStatus,
+  WorktreeStatus,
   type AgentRun,
   type Project,
   type Task,
@@ -51,13 +53,21 @@ class InMemoryRunRepository implements RunLifecycleRepository {
     return found ? { task: found, project: project() } : null;
   }
 
+  async claimTaskWorktree(id: string) {
+    const found = this.tasks.find((candidate) => candidate.id === id);
+    if (!found) throw new Error(`Task ${id} was not found`);
+    if (found.status !== TaskStatus.TODO) throw new Error(`Task ${id} is not ready to create a worktree`);
+    found.status = TaskStatus.CREATING_WORKTREE;
+    return { task: found, project: project() };
+  }
+
   async claimTaskRun(
     id: string,
     input: Omit<AgentRun, "id" | "startedAt" | "finishedAt" | "taskId">,
   ) {
     const found = this.tasks.find((candidate) => candidate.id === id);
     if (!found) throw new Error(`Task ${id} was not found`);
-    if (found.status !== TaskStatus.TODO) throw new Error(`Task ${id} is not ready to run`);
+    if (found.status !== TaskStatus.TODO && found.status !== TaskStatus.CREATING_WORKTREE) throw new Error(`Task ${id} is not ready to run`);
     const created: AgentRun = {
       ...input,
       taskId: id,
@@ -183,6 +193,60 @@ function createService(adapter = new FakeAdapter(), humanInput?: RunHumanInputLi
 }
 
 describe("RunService", () => {
+  it("creates an isolated worktree before launching Codex inside its persisted path", async () => {
+    const adapter = new FakeAdapter();
+    const repository = new InMemoryRunRepository(task({ executionMode: ExecutionMode.ISOLATED_WORKTREE }));
+    const created: string[] = [];
+    const worktree = {
+      id: "worktree-1", taskId: "task-1", projectId: "project-1", projectPath: "C:\\fixture",
+      worktreePath: "C:\\fixture\\.agentdeck\\worktrees\\task-task-1", taskBranch: "agentdeck/task-task-1",
+      baselineBranch: "main", baselineSha: "a".repeat(40), createdAt: new Date(), status: WorktreeStatus.READY,
+      error: null, cleanupRequestedAt: null, cleanedAt: null, cleanupError: null,
+    };
+    const service = new RunService({
+      repository, adapter, events: new MemoryEvents(), git: { getChangedPaths: async () => [], getDiff: async () => "" },
+      worktrees: { create: async (id: string) => { created.push(id); return worktree; } },
+    } as never);
+
+    await service.launch("task-1");
+
+    expect(created).toEqual(["task-1"]);
+    expect(adapter.requests[0].cwd).toBe(worktree.worktreePath);
+  });
+
+  it("records WORKTREE_FAILED without launching Codex when isolated creation fails", async () => {
+    const adapter = new FakeAdapter();
+    const repository = new InMemoryRunRepository(task({ executionMode: ExecutionMode.ISOLATED_WORKTREE }));
+    const service = new RunService({
+      repository, adapter, events: new MemoryEvents(), git: { getChangedPaths: async () => [], getDiff: async () => "" },
+      worktrees: { create: async () => { throw new Error("git worktree add failed"); } },
+    } as never);
+
+    await expect(service.launch("task-1")).rejects.toThrow("git worktree add failed");
+
+    expect(adapter.requests).toEqual([]);
+    expect(repository.tasks[0].status).toBe(TaskStatus.WORKTREE_FAILED);
+    expect(repository.runs).toEqual([]);
+  });
+
+  it("uses the baseline ReviewService result when an isolated run completes", async () => {
+    const adapter = new FakeAdapter();
+    const repository = new InMemoryRunRepository(task({ executionMode: ExecutionMode.ISOLATED_WORKTREE }));
+    const review = { changedPaths: ["isolated.txt"], diff: "baseline diff", commitSummary: "abc isolated change" };
+    const service = new RunService({
+      repository, adapter, events: new MemoryEvents(), git: { getChangedPaths: async () => ["wrong.txt"], getDiff: async () => "wrong diff" },
+      worktrees: { create: async () => ({ worktreePath: "C:\\fixture\\.agentdeck\\worktrees\\task-task-1" }) },
+      reviewService: { getReview: async () => review },
+    } as never);
+
+    const run = await service.launch("task-1");
+    adapter.complete(0);
+    await service.waitForCompletion(run.id);
+
+    expect(repository.tasks[0].status).toBe(TaskStatus.REVIEW);
+    expect(repository.capturedDiffs.get(run.id)).toEqual({ changedPaths: review.changedPaths, diff: review.diff });
+  });
+
   it("launches a task, records the PID, and persists adapter events", async () => {
     const { adapter, events, repository, service } = createService();
 

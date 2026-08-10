@@ -21,7 +21,7 @@ const legalTransitions: Readonly<Record<TaskStatus, readonly TaskStatus[]>> = {
   ],
   [TaskStatus.REVIEW]: [TaskStatus.MERGE_READY, TaskStatus.DONE, TaskStatus.CLEANED],
   [TaskStatus.MERGE_READY]: [TaskStatus.CLEANED, TaskStatus.DONE],
-  [TaskStatus.DONE]: [],
+  [TaskStatus.DONE]: [TaskStatus.CLEANED],
   [TaskStatus.CLEANED]: [],
   [TaskStatus.FAILED]: [],
   [TaskStatus.WORKTREE_FAILED]: [],

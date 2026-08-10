@@ -4,6 +4,9 @@ import { AgentRunStatus, HumanInputAction, TaskStatus, type Task } from "../../.
 import {
   createTaskRetryRouteHandlers,
   createTaskHumanInputRouteHandlers,
+  createTaskWorktreeCleanupRouteHandlers,
+  createTaskMarkDoneRouteHandlers,
+  createTaskMarkMergeReadyRouteHandlers,
   createTaskRunRouteHandlers,
   createTaskStopRouteHandlers,
 } from "../../../lib/api/task-action-handlers";
@@ -109,5 +112,17 @@ describe("task action routes", () => {
     }), context);
 
     expect(response.status).toBe(400);
+  });
+
+  it("performs merge-ready, done, and clean-worktree actions using only the route task id", async () => {
+    const calls: string[] = [];
+    const mergeReady = createTaskMarkMergeReadyRouteHandlers({ markMergeReady: async (id) => { calls.push(`merge:${id}`); } });
+    const done = createTaskMarkDoneRouteHandlers({ markDone: async (id) => { calls.push(`done:${id}`); } });
+    const cleanup = createTaskWorktreeCleanupRouteHandlers({ cleanup: async (id) => { calls.push(`cleanup:${id}`); } });
+
+    expect((await mergeReady.POST(new Request("http://localhost"), context)).status).toBe(204);
+    expect((await done.POST(new Request("http://localhost"), context)).status).toBe(204);
+    expect((await cleanup.POST(new Request("http://localhost"), context)).status).toBe(204);
+    expect(calls).toEqual(["merge:task-1", "done:task-1", "cleanup:task-1"]);
   });
 });

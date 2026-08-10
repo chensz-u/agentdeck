@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { TaskStatus, type Task } from "../domain/types";
+import { HumanInputAction, HumanInputDeliveryStatus, TaskStatus, WorktreeStatus, type Task } from "../domain/types";
 import {
   createDashboardRouteHandlers,
   createTaskRouteHandlers,
@@ -98,6 +98,36 @@ describe("task API handlers", () => {
     await expect(response.json()).resolves.toMatchObject({ id: "task-1" });
   });
 
+  it("returns sanitized isolated worktree, baseline review, and human-request metadata", async () => {
+    const store = new InMemoryTaskApiStore([task({ status: TaskStatus.REVIEW })]);
+    Object.assign(store, {
+      findLatestRun: async () => ({ id: "run-1", taskId: "task-1" }),
+      findDiff: async () => ({ changedPaths: ["isolated.txt"], diff: "baseline diff" }),
+      findWorktreeByTaskId: async () => ({
+        id: "worktree-1", taskId: "task-1", projectId: "project-1", projectPath: "C:\\secret-project",
+        worktreePath: "C:\\secret-project\\.agentdeck\\worktrees\\task-task-1", taskBranch: "agentdeck/task-task-1",
+        baselineBranch: "main", baselineSha: "a".repeat(40), createdAt: new Date(), status: WorktreeStatus.READY,
+        error: null, cleanupRequestedAt: null, cleanedAt: null, cleanupError: null,
+      }),
+      listHumanInputs: async () => [{
+        id: "audit-1", sequence: 1, taskId: "task-1", runId: "run-1", action: HumanInputAction.REQUEST,
+        requestId: "request-1", payload: { kind: "QUESTION", threadId: "secret-thread", turnId: "secret-turn", questionIds: ["q-1"] },
+        deliveryStatus: HumanInputDeliveryStatus.PENDING, deliveryError: null, createdAt: new Date(),
+      }],
+    });
+
+    const response = await createTaskDetailRouteHandlers(store).GET(new Request("http://localhost/api/tasks/task-1"), contextFor("task-1"));
+    const body = await response.json();
+
+    expect(body).toMatchObject({
+      worktree: { id: "worktree-1", status: WorktreeStatus.READY, taskBranch: "agentdeck/task-task-1" },
+      review: { changedPaths: ["isolated.txt"], diff: "baseline diff" },
+      humanInputRequests: [{ requestId: "request-1", payload: { kind: "QUESTION", questionIds: ["q-1"] } }],
+    });
+    expect(JSON.stringify(body)).not.toContain("secret-project");
+    expect(JSON.stringify(body)).not.toContain("secret-thread");
+  });
+
   it("reports counts grouped by task status", async () => {
     const response = await createDashboardRouteHandlers(new InMemoryTaskApiStore([
       task({ id: "todo", status: TaskStatus.TODO }),
@@ -116,3 +146,7 @@ describe("task API handlers", () => {
     });
   });
 });
+
+function contextFor(id: string) {
+  return { params: Promise.resolve({ id }) };
+}

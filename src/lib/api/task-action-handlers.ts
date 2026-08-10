@@ -12,6 +12,9 @@ export type HumanInputTaskAction = {
   findLatestRun(taskId: string): Promise<AgentRun | null>;
   submit(input: HumanInputSubmission): Promise<unknown>;
 };
+export type MarkMergeReadyTaskAction = { markMergeReady(taskId: string): Promise<void> };
+export type MarkDoneTaskAction = { markDone(taskId: string): Promise<void> };
+export type WorktreeCleanupTaskAction = { cleanup(taskId: string): Promise<void> };
 
 const stopSchema = z.object({ runId: z.string().trim().min(1) }).strict();
 const humanInputSchema = z.object({
@@ -98,4 +101,30 @@ export function createTaskHumanInputRouteHandlers(service: HumanInputTaskAction)
       }
     },
   };
+}
+
+function createTaskIdOnlyActionHandlers(action: (taskId: string) => Promise<void>, fallback: string) {
+  return {
+    async POST(_request: Request, context: RouteContext): Promise<Response> {
+      const { id } = await context.params;
+      try {
+        await action(id);
+        return new Response(null, { status: 204 });
+      } catch (error) {
+        return Response.json({ error: error instanceof Error ? error.message : fallback }, { status: 400 });
+      }
+    },
+  };
+}
+
+export function createTaskMarkMergeReadyRouteHandlers(service: MarkMergeReadyTaskAction) {
+  return createTaskIdOnlyActionHandlers((taskId) => service.markMergeReady(taskId), "Unable to mark task merge ready");
+}
+
+export function createTaskMarkDoneRouteHandlers(service: MarkDoneTaskAction) {
+  return createTaskIdOnlyActionHandlers((taskId) => service.markDone(taskId), "Unable to mark task done");
+}
+
+export function createTaskWorktreeCleanupRouteHandlers(service: WorktreeCleanupTaskAction) {
+  return createTaskIdOnlyActionHandlers((taskId) => service.cleanup(taskId), "Unable to clean worktree");
 }

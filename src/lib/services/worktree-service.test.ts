@@ -89,6 +89,11 @@ class MemoryWorktreeRepository implements WorktreeRepository {
     this.updates.push({ id, update });
     Object.assign(this.worktree, update);
   }
+
+  async updateTaskStatus(taskId: string, status: TaskStatus): Promise<void> {
+    if (taskId !== this.task.id) throw new Error("Task not found");
+    this.task.status = status;
+  }
 }
 
 describe("WorktreeService", () => {
@@ -212,6 +217,7 @@ describe("WorktreeService", () => {
     expect(existsSync(worktree.worktreePath)).toBe(false);
     expect(existsSync(path)).toBe(true);
     expect(repository.worktree).toMatchObject({ status: WorktreeStatus.CLEANED, cleanupError: null });
+    expect(repository.task.status).toBe(TaskStatus.CLEANED);
     expect(() => git(path, ["rev-parse", "--verify", worktree.taskBranch])).toThrow();
   });
 

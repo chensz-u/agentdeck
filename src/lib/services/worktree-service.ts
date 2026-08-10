@@ -18,6 +18,7 @@ export interface WorktreeRepository {
     worktreeId: string,
     update: Partial<Omit<Worktree, "id" | "taskId" | "projectId" | "projectPath" | "worktreePath" | "taskBranch" | "baselineBranch" | "baselineSha" | "createdAt">>,
   ): Promise<void>;
+  updateTaskStatus(taskId: string, status: TaskStatus): Promise<void>;
 }
 
 export type WorktreeInspection = {
@@ -102,6 +103,9 @@ export class WorktreeService {
     const projectPath = await this.requireRegisteredGitProject(project);
 
     this.assertManagedWorktree(projectPath, worktree);
+    if (worktree.status !== WorktreeStatus.READY) {
+      throw new Error(`Worktree ${worktree.id} is not READY for cleanup`);
+    }
     if (![TaskStatus.REVIEW, TaskStatus.MERGE_READY, TaskStatus.DONE].includes(task.status)) {
       throw new Error("Cleanup is only allowed for REVIEW, MERGE_READY, or DONE tasks");
     }
@@ -123,6 +127,7 @@ export class WorktreeService {
         cleanedAt: this.now(),
         cleanupError: null,
       });
+      await this.options.repository.updateTaskStatus(task.id, TaskStatus.CLEANED);
     } catch (error) {
       const cleanupError = message(error);
       await this.options.repository.updateWorktree(worktree.id, {

@@ -7,12 +7,18 @@ import { RunEventStore } from "../services/run-event-store";
 import { RunService } from "../services/run-service";
 import { HumanInputService } from "../services/human-input-service";
 import { TaskService } from "../services/task-service";
+import { TaskLifecycleService } from "../services/task-lifecycle-service";
+import { WorktreeService } from "../services/worktree-service";
+import { ReviewService } from "../services/review-service";
 import { LocalRepository } from "./local-repository";
 
 export type ServerComposition = {
   repository: LocalRepository;
   taskService: TaskService;
+  taskLifecycleService: TaskLifecycleService;
   runService: RunService;
+  worktreeService: WorktreeService;
+  reviewService: ReviewService;
   humanInputService: HumanInputService;
   runEventBus: RunEventBus;
   runEventStore: RunEventStore;
@@ -49,15 +55,22 @@ function createServerComposition(): ServerComposition {
     ? new ControlledE2eAdapter()
     : new FallbackCodexAdapter(new AppServerAdapter(), new ExecFallbackAdapter());
   const humanInputService = new HumanInputService({ repository, adapter });
+  const worktreeService = new WorktreeService({ repository });
+  const reviewService = new ReviewService({ repository });
   return {
     repository,
     taskService: new TaskService(repository),
+    taskLifecycleService: new TaskLifecycleService(repository),
+    worktreeService,
+    reviewService,
     runService: new RunService({
       repository,
       adapter,
       events: runEventStore,
       git: new GitService(),
       humanInput: humanInputService,
+      worktrees: worktreeService,
+      reviewService,
     }),
     humanInputService,
     runEventBus,

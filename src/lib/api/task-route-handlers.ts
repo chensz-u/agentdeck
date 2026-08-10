@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { TaskStatus, type AgentRun, type Task } from "../domain/types";
+import { HumanInputAction, TaskStatus, type AgentRun, type HumanInputAuditEntry, type Task, type Worktree } from "../domain/types";
 import type { RegisteredProject } from "../services/project-service";
 import { TaskService, type TaskRepository } from "../services/task-service";
 
@@ -50,6 +50,8 @@ export function createTaskRouteHandlers(repository: TaskApiStore) {
 export type TaskDetailStore = Pick<TaskApiStore, "findTask"> & {
   findLatestRun?(taskId: string): Promise<AgentRun | null>;
   findDiff?(runId: string): Promise<{ changedPaths: string[]; diff: string } | null>;
+  findWorktreeByTaskId?(taskId: string): Promise<Worktree | null>;
+  listHumanInputs?(runId: string): Promise<HumanInputAuditEntry[]>;
 };
 
 export function createTaskDetailRouteHandlers(repository: TaskDetailStore) {
@@ -61,8 +63,56 @@ export function createTaskDetailRouteHandlers(repository: TaskDetailStore) {
 
       const run = repository.findLatestRun ? await repository.findLatestRun(task.id) : null;
       const review = run && repository.findDiff ? await repository.findDiff(run.id) : null;
-      return Response.json({ ...task, run, changedPaths: review?.changedPaths ?? [], diff: review?.diff ?? "" });
+      const worktree = repository.findWorktreeByTaskId ? await repository.findWorktreeByTaskId(task.id) : null;
+      const humanInputRequests = run && repository.listHumanInputs
+        ? (await repository.listHumanInputs(run.id))
+          .filter((entry) => entry.action === HumanInputAction.REQUEST)
+          .map(sanitizeHumanInput)
+        : [];
+      return Response.json({
+        ...task,
+        run,
+        changedPaths: review?.changedPaths ?? [],
+        diff: review?.diff ?? "",
+        review: review ? { changedPaths: review.changedPaths, diff: review.diff } : null,
+        worktree: worktree ? sanitizeWorktree(worktree) : null,
+        humanInputRequests,
+      });
     },
+  };
+}
+
+function sanitizeWorktree(worktree: Worktree) {
+  return {
+    id: worktree.id,
+    status: worktree.status,
+    taskBranch: worktree.taskBranch,
+    baselineBranch: worktree.baselineBranch,
+    baselineSha: worktree.baselineSha,
+    error: worktree.error,
+    cleanupRequestedAt: worktree.cleanupRequestedAt,
+    cleanedAt: worktree.cleanedAt,
+    cleanupError: worktree.cleanupError,
+  };
+}
+
+function sanitizeHumanInput(entry: HumanInputAuditEntry) {
+  return {
+    requestId: entry.requestId,
+    deliveryStatus: entry.deliveryStatus,
+    deliveryError: entry.deliveryError,
+    createdAt: entry.createdAt,
+    payload: sanitizeHumanPayload(entry.payload),
+  };
+}
+
+function sanitizeHumanPayload(payload: unknown): unknown {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const value = payload as { kind?: unknown; questionIds?: unknown; permissions?: unknown };
+  return {
+    kind: typeof value.kind === "string" ? value.kind : null,
+    questionIds: Array.isArray(value.questionIds) ? value.questionIds.filter((id): id is string => typeof id === "string") : [],
+    permissions: value.permissions && typeof value.permissions === "object" && !Array.isArray(value.permissions) ? value.permissions : {},
   };
 }
 

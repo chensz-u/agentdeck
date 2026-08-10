@@ -29,6 +29,8 @@ export class TaskService {
       title: original.title,
       prompt: original.prompt,
       status: TaskStatus.TODO,
+      executionMode: original.executionMode,
+      worktreeId: null,
     });
   }
 }

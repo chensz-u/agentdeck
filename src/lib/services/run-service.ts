@@ -1,4 +1,4 @@
-import { AgentRunStatus, TaskStatus, type AgentRun, type Project, type Task } from "../domain/types";
+import { AgentRunStatus, ExecutionMode, TaskStatus, type AgentRun, type Project, type Task, type Worktree } from "../domain/types";
 import type { CodexAdapter, CodexRunCompletion } from "../codex/codex-adapter";
 import type { AppServerHumanInputRequest } from "../codex/app-server-adapter";
 import type { HumanInputRequestRecord } from "./human-input-service";
@@ -6,6 +6,8 @@ import type { RunEventInput } from "./run-event-store";
 
 export interface RunLifecycleRepository {
   findTaskWithProject(taskId: string): Promise<{ task: Task; project: Project } | null>;
+  /** Atomically transitions an isolated TODO task to CREATING_WORKTREE. */
+  claimTaskWorktree?(taskId: string): Promise<{ task: Task; project: Project }>;
   claimTaskRun(
     taskId: string,
     input: Omit<AgentRun, "id" | "startedAt" | "finishedAt" | "taskId">,
@@ -34,6 +36,14 @@ export type RunHumanInputLifecycle = {
   markTerminal(runId: string): Promise<void>;
 };
 
+export type RunWorktreeLifecycle = {
+  create(taskId: string): Promise<Pick<Worktree, "worktreePath">>;
+};
+
+export type RunReviewLifecycle = {
+  getReview(taskId: string): Promise<{ changedPaths: string[]; diff: string }>;
+};
+
 type ActiveRun = {
   task: Task;
   project: Project;
@@ -47,6 +57,8 @@ type RunServiceOptions = {
   events: RunEventWriter;
   git: RunGitService;
   humanInput?: RunHumanInputLifecycle;
+  worktrees?: RunWorktreeLifecycle;
+  reviewService?: RunReviewLifecycle;
   now?: () => Date;
 };
 
@@ -60,6 +72,21 @@ export class RunService {
   }
 
   async launch(taskId: string): Promise<AgentRun> {
+    const initial = await this.options.repository.findTaskWithProject(taskId);
+    if (!initial) throw new Error(`Task ${taskId} was not found`);
+    let isolatedWorktreePath: string | null = null;
+    if (initial.task.executionMode === ExecutionMode.ISOLATED_WORKTREE) {
+      if (!this.options.repository.claimTaskWorktree || !this.options.worktrees) {
+        throw new Error("Isolated worktree launch is not configured");
+      }
+      await this.options.repository.claimTaskWorktree(taskId);
+      try {
+        isolatedWorktreePath = (await this.options.worktrees.create(taskId)).worktreePath;
+      } catch (error) {
+        await this.options.repository.updateTaskStatus(taskId, TaskStatus.WORKTREE_FAILED);
+        throw error;
+      }
+    }
     const context = await this.options.repository.claimTaskRun(taskId, {
       agent: "codex",
       status: AgentRunStatus.RUNNING,
@@ -75,7 +102,7 @@ export class RunService {
       const handle = await this.options.adapter.launch({
         runId: run.id,
         prompt: context.task.prompt,
-        cwd: context.project.path,
+        cwd: isolatedWorktreePath ?? context.project.path,
         onSession: async (session) => {
           run.threadId = session.threadId;
           run.turnId = session.turnId;
@@ -155,11 +182,15 @@ export class RunService {
       error = null;
     } else if (result.exitCode === 0) {
       try {
+        const isolated = active.task.executionMode === ExecutionMode.ISOLATED_WORKTREE;
         const project = { path: active.project.path, gitEnabled: active.project.gitEnabled };
-        const [changedPaths, diff] = await Promise.all([
-          this.options.git.getChangedPaths(project),
-          this.options.git.getDiff(project),
-        ]);
+        const review = isolated ? await this.requireReviewService().getReview(run.taskId) : null;
+        const [changedPaths, diff] = review
+          ? [review.changedPaths, review.diff]
+          : await Promise.all([
+            this.options.git.getChangedPaths(project),
+            this.options.git.getDiff(project),
+          ]);
         await this.options.repository.saveDiff(run.id, changedPaths, diff);
         runStatus = AgentRunStatus.SUCCEEDED;
         taskStatus = TaskStatus.REVIEW;
@@ -180,5 +211,10 @@ export class RunService {
       params: { status: runStatus, exitCode: result.exitCode, error },
     });
     this.active.delete(run.id);
+  }
+
+  private requireReviewService(): RunReviewLifecycle {
+    if (!this.options.reviewService) throw new Error("Isolated worktree review is not configured");
+    return this.options.reviewService;
   }
 }

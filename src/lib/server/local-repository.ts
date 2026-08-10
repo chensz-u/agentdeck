@@ -183,7 +183,13 @@ export class LocalRepository implements ProjectStore, TaskApiStore, RunLifecycle
     return this.mutate(() => {
       const task = this.data.tasks.find((candidate) => candidate.id === taskId);
       if (!task) throw new Error(`Task ${taskId} was not found`);
-      if (task.status !== TaskStatus.TODO) throw new Error(`Task ${taskId} is not ready to run`);
+      const isolatedLaunch = task.executionMode === ExecutionMode.ISOLATED_WORKTREE;
+      if (task.status !== TaskStatus.TODO && !(isolatedLaunch && task.status === TaskStatus.CREATING_WORKTREE)) {
+        throw new Error(`Task ${taskId} is not ready to run`);
+      }
+      if (isolatedLaunch && (!task.worktreeId || !this.data.worktrees.some((worktree) => worktree.id === task.worktreeId && worktree.status === WorktreeStatus.READY))) {
+        throw new Error(`Task ${taskId} does not have a ready worktree`);
+      }
       const project = this.data.projects.find((candidate) => candidate.id === task.projectId);
       if (!project) throw new Error(`Project ${task.projectId} was not found`);
 
@@ -227,6 +233,23 @@ export class LocalRepository implements ProjectStore, TaskApiStore, RunLifecycle
       if (!task) throw new Error(`Task ${taskId} was not found`);
       task.status = transitionTask(task.status, status);
       task.updatedAt = new Date().toISOString();
+    });
+  }
+
+  /** Atomically reserves a TODO isolated task before its Git worktree is created. */
+  async claimTaskWorktree(taskId: string): Promise<{ task: Task; project: Project }> {
+    return this.mutate(() => {
+      const task = this.data.tasks.find((candidate) => candidate.id === taskId);
+      if (!task) throw new Error(`Task ${taskId} was not found`);
+      if (task.executionMode !== ExecutionMode.ISOLATED_WORKTREE) {
+        throw new Error(`Task ${taskId} is not configured for an isolated worktree`);
+      }
+      if (task.status !== TaskStatus.TODO) throw new Error(`Task ${taskId} is not ready to create a worktree`);
+      const project = this.data.projects.find((candidate) => candidate.id === task.projectId);
+      if (!project) throw new Error(`Project ${task.projectId} was not found`);
+      task.status = TaskStatus.CREATING_WORKTREE;
+      task.updatedAt = new Date().toISOString();
+      return { task: asTask(task), project: asProject(project) };
     });
   }
 
