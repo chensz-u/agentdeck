@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   AgentRunStatus,
+  AgentAvailability,
+  AgentId,
   ExecutionMode,
   TaskStatus,
   WorktreeStatus,
@@ -9,6 +11,7 @@ import {
   type Project,
   type Task,
 } from "../domain/types";
+import { AgentRegistry } from "../agents/agent-registry";
 import type { CodexAdapter, CodexHumanInputResponse, CodexRunRequest } from "../codex/codex-adapter";
 import { RunService, type RunHumanInputLifecycle, type RunLifecycleRepository } from "./run-service";
 
@@ -267,6 +270,19 @@ describe("RunService", () => {
       type: "process/stderr",
       params: { text: "permission denied token=never-store" },
     });
+  });
+
+  it("snapshots the verified selected Agent version into the persisted run", async () => {
+    const adapter = new FakeAdapter();
+    const repository = new InMemoryRunRepository(task({ agentId: AgentId.CODEX }));
+    const service = new RunService({
+      repository, adapter, events: new MemoryEvents(), git: { getChangedPaths: async () => [], getDiff: async () => "" },
+      agentRegistry: new AgentRegistry({ codex: { availability: AgentAvailability.AVAILABLE, version: "codex-cli 0.142.0" } }),
+    });
+
+    const run = await service.launch("task-1");
+
+    expect(run).toMatchObject({ agent: AgentId.CODEX, agentVersion: "codex-cli 0.142.0", agentAvailability: AgentAvailability.AVAILABLE });
   });
 
   it("routes a server-originated input request into the shared human-input lifecycle before it is streamed", async () => {

@@ -48,6 +48,7 @@ class ControlledE2eAdapter implements CodexAdapter {
 
   async launch(request: CodexRunRequest) {
     this.launches += 1;
+    await request.onOutput?.({ stream: "stdout", text: "受控 Codex 正在执行任务" });
     await request.onEvent({ type: "codex/exec", params: { message: "stubbed activity" } });
     const completed = new Promise<{ exitCode: number }>((resolve) => {
       this.completions.set(request.runId, resolve);
@@ -116,6 +117,7 @@ function createServerComposition(): ServerComposition {
       humanInput: humanInputService,
       worktrees: worktreeService,
       reviewService,
+      agentRegistry,
     }),
     humanInputService,
     runEventBus,

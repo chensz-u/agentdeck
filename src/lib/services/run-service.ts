@@ -3,6 +3,7 @@ import type { CodexAdapter, CodexRunCompletion } from "../codex/codex-adapter";
 import type { AppServerHumanInputRequest } from "../codex/app-server-adapter";
 import type { HumanInputRequestRecord } from "./human-input-service";
 import type { RunEventInput } from "./run-event-store";
+import { AgentRegistry } from "../agents/agent-registry";
 
 export interface RunLifecycleRepository {
   findTaskWithProject(taskId: string): Promise<{ task: Task; project: Project } | null>;
@@ -59,6 +60,7 @@ type RunServiceOptions = {
   humanInput?: RunHumanInputLifecycle;
   worktrees?: RunWorktreeLifecycle;
   reviewService?: RunReviewLifecycle;
+  agentRegistry?: AgentRegistry;
   now?: () => Date;
 };
 
@@ -87,10 +89,11 @@ export class RunService {
         throw error;
       }
     }
+    const agent = this.options.agentRegistry?.requireAvailable(initial.task.agentId ?? AgentId.CODEX);
     const context = await this.options.repository.claimTaskRun(taskId, {
-      agent: initial.task.agentId ?? AgentId.CODEX,
-      agentVersion: null,
-      agentAvailability: AgentAvailability.AVAILABLE,
+      agent: agent?.id ?? initial.task.agentId ?? AgentId.CODEX,
+      agentVersion: agent?.version ?? null,
+      agentAvailability: agent?.availability ?? AgentAvailability.AVAILABLE,
       status: AgentRunStatus.RUNNING,
       pid: null,
       exitCode: null,
