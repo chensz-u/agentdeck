@@ -36,7 +36,7 @@ export function TaskCreateForm({ projectId, projectIsGitRepository, onCreated }:
     const body = await response.json() as WorkspaceTask & { error?: string };
     setSubmitting(false);
     if (!response.ok) {
-      setError(body.error ?? "Unable to create this task.");
+      setError(body.error ?? "无法创建任务。");
       return;
     }
     setTitle("");
@@ -47,19 +47,19 @@ export function TaskCreateForm({ projectId, projectIsGitRepository, onCreated }:
   return (
     <form className="task-form" onSubmit={submit}>
       <label>
-        Task title
-        <input value={title} onChange={(event) => setTitle(event.target.value)} required />
+        任务标题
+        <input name="task-title" autoComplete="off" value={title} onChange={(event) => setTitle(event.target.value)} required placeholder="例如：修复登录超时" />
       </label>
       <label>
-        Task prompt
-        <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} required rows={3} />
+        任务说明
+        <textarea name="task-prompt" value={prompt} onChange={(event) => setPrompt(event.target.value)} required rows={3} placeholder="说明目标、约束和验收条件。" />
       </label>
       <fieldset className="execution-mode">
-        <legend>Execution mode</legend>
-        <label><input type="radio" name="execution-mode" value={ExecutionMode.CURRENT_WORKSPACE} checked={executionMode === ExecutionMode.CURRENT_WORKSPACE} onChange={() => setExecutionMode(ExecutionMode.CURRENT_WORKSPACE)} /> Current workspace</label>
-        <label title={projectIsGitRepository ? undefined : "Isolated worktrees require a Git project."}><input type="radio" name="execution-mode" value={ExecutionMode.ISOLATED_WORKTREE} checked={executionMode === ExecutionMode.ISOLATED_WORKTREE} onChange={() => setExecutionMode(ExecutionMode.ISOLATED_WORKTREE)} disabled={!projectIsGitRepository} /> Isolated worktree {!projectIsGitRepository && <span className="muted">(requires Git)</span>}</label>
+        <legend>运行模式</legend>
+        <div className="segmented-control"><label><input type="radio" name="execution-mode" value={ExecutionMode.CURRENT_WORKSPACE} checked={executionMode === ExecutionMode.CURRENT_WORKSPACE} onChange={() => setExecutionMode(ExecutionMode.CURRENT_WORKSPACE)} /><span><strong>当前工作区</strong><small>沿用现有目录</small></span></label>
+        <label title={projectIsGitRepository ? undefined : "隔离 Worktree 仅支持 Git 项目。"}><input aria-label="隔离 Worktree" type="radio" name="execution-mode" value={ExecutionMode.ISOLATED_WORKTREE} checked={executionMode === ExecutionMode.ISOLATED_WORKTREE} onChange={() => setExecutionMode(ExecutionMode.ISOLATED_WORKTREE)} disabled={!projectIsGitRepository} /><span><strong>隔离 Worktree</strong><small>{projectIsGitRepository ? "创建独立分支，不直接修改主工作区" : "仅 Git 项目可创建隔离分支"}</small></span></label></div>
       </fieldset>
-      <button type="submit" disabled={submitting}>{submitting ? "Creating…" : "Create task"}</button>
+      <button type="submit" disabled={submitting}>{submitting ? "正在创建…" : "创建任务"}</button>
       {error && <p className="form-error" role="alert">{error}</p>}
     </form>
   );

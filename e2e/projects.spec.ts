@@ -21,17 +21,17 @@ test("registers a Git project and creates a TODO task", async ({ page }) => {
 
   try {
     await page.goto("/projects");
-    await page.getByLabel("Project name").fill("E2E fixture");
-    await page.getByLabel("Local Git repository path").fill(fixture);
-    await page.getByRole("button", { name: "Add project" }).click();
+    await page.getByLabel("项目名称").fill("E2E fixture");
+    await page.getByLabel("本地项目路径").fill(fixture);
+    await page.getByRole("button", { name: "登记项目" }).click();
 
     await expect(page).toHaveURL(/\/projects\/.+/);
-    await page.getByLabel("Task title").fill("Create the TODO task");
-    await page.getByLabel("Task prompt").fill("Create a task through the project workspace.");
-    await page.getByRole("button", { name: "Create task" }).click();
+    await page.getByLabel("任务标题").fill("Create the TODO task");
+    await page.getByLabel("任务说明").fill("Create a task through the project workspace.");
+    await page.getByRole("button", { name: "创建任务" }).click();
 
     await expect(page.getByText("Create the TODO task")).toBeVisible();
-    await expect(page.getByText("TODO", { exact: true })).toBeVisible();
+    await expect(page.getByLabel("TODO")).toBeVisible();
 
     const projectId = new URL(page.url()).pathname.split("/").at(-1);
     const tasksResponse = await page.request.get(`/api/tasks?projectId=${projectId}`);

@@ -10,6 +10,7 @@ import { HumanInputCard } from "../../../components/human-input-card";
 import { StatusBadge } from "../../../components/status-badge";
 import { TaskActions } from "../../../components/task-actions";
 import { WorktreeCard } from "../../../components/worktree-card";
+import { ConsoleShell } from "../../../components/console-shell";
 import { TaskStatus } from "../../../lib/domain/types";
 
 type TaskDetail = {
@@ -50,18 +51,17 @@ export default function TaskDetailClient({ taskId }: { taskId: string }) {
     return () => source.close();
   }, [detail?.run?.id, load]);
 
-  if (missing) return <main className="app-shell"><header className="topbar"><Link className="brand" href="/">AgentDeck</Link></header><section className="empty-panel"><h1>Task not found</h1></section></main>;
-  if (!detail) return <main className="app-shell"><p className="muted">Loading task…</p></main>;
+  if (missing) return <ConsoleShell title="任务不存在"><section className="empty-panel"><h1>未找到该任务</h1></section></ConsoleShell>;
+  if (!detail) return <ConsoleShell title="正在读取任务"><p className="muted">正在读取本地任务…</p></ConsoleShell>;
 
-  return <main className="app-shell">
-    <header className="topbar"><Link className="brand" href="/">AgentDeck</Link><nav aria-label="Primary navigation"><Link href="/projects">Projects</Link></nav></header>
-    <Link className="back-link" href={`/projects/${detail.projectId}`}>← Project workspace</Link>
-    <section className="project-hero task-hero"><p className="eyebrow">TASK DETAIL</p><h1>{detail.title}</h1><p>{detail.prompt}</p><StatusBadge status={detail.status} /></section>
+  return <ConsoleShell projectId={detail.projectId} title={detail.title} meta={detail.worktree?.taskBranch ?? "当前工作区"}>
+    <Link className="back-link" href={`/projects/${detail.projectId}`}>← 返回项目工作区</Link>
+    <section className="task-command-header"><div><p className="eyebrow">任务详情</p><h1>{detail.title}</h1><p>{detail.prompt}</p></div><div className="task-state"><StatusBadge status={detail.status} /><span>{detail.worktree ? "隔离 Worktree" : "当前工作区"}</span></div></section>
     <TaskActions taskId={detail.id} status={detail.status} runId={detail.run?.id ?? null} hasWorktree={Boolean(detail.worktree)} onChanged={load} onRetry={(id) => router.push(`/tasks/${id}`)} />
-    {detail.run?.error && <p className="form-error" role="alert">{detail.run.error}</p>}
-    <WorktreeCard worktree={detail.worktree} />
-    <HumanInputCard taskId={detail.id} requests={detail.humanInputRequests} onSubmitted={load} />
-    <EventFeed events={events} />
-    <DiffViewer changedPaths={detail.review?.changedPaths ?? detail.changedPaths} diff={detail.review?.diff ?? detail.diff} baselineBranch={detail.worktree?.baselineBranch} baselineSha={detail.worktree?.baselineSha} taskBranch={detail.worktree?.taskBranch} commitSummary={detail.review?.commitSummary} />
-  </main>;
+    {detail.run?.error && <p className="form-error run-error" role="alert">运行失败：{detail.run.error}</p>}
+    <div className="task-panels">
+      <div className="task-primary-column"><HumanInputCard taskId={detail.id} requests={detail.humanInputRequests} onSubmitted={load} /><DiffViewer changedPaths={detail.review?.changedPaths ?? detail.changedPaths} diff={detail.review?.diff ?? detail.diff} baselineBranch={detail.worktree?.baselineBranch} baselineSha={detail.worktree?.baselineSha} taskBranch={detail.worktree?.taskBranch} commitSummary={detail.review?.commitSummary} /></div>
+      <aside className="task-side-column"><WorktreeCard worktree={detail.worktree} /><EventFeed events={events} /></aside>
+    </div>
+  </ConsoleShell>;
 }
