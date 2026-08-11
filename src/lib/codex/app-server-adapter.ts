@@ -1,8 +1,9 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
 
 import { parseCodexEvent } from "./protocol";
-import type { CodexAdapter, CodexRunCompletion, CodexRunHandle, CodexRunRequest } from "./codex-adapter";
+import type { CodexAdapter, CodexHumanInputResponse, CodexRunCompletion, CodexRunHandle, CodexRunRequest } from "./codex-adapter";
 import type { CodexEvent } from "./protocol";
+import { SupervisedProcess, type SupervisedProcessHandle } from "../runtime/supervised-process";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -23,6 +24,65 @@ export function normalizeAppServerNotification(message: unknown): CodexEvent | n
   } catch {
     return null;
   }
+}
+
+export type AppServerHumanInputRequest = {
+  requestId: string;
+  rpcId: string | number;
+  kind: "CONFIRMATION" | "QUESTION" | "PERMISSIONS";
+  threadId: string;
+  turnId: string;
+  prompt: string;
+  questionIds?: string[];
+  questions?: Array<{ id: string; header: string; question: string; options: string[] }>;
+  options?: string[];
+  permissions?: JsonRecord;
+};
+
+function readSession(params: JsonRecord): { threadId: string; turnId: string } | null {
+  return typeof params.threadId === "string" && typeof params.turnId === "string"
+    ? { threadId: params.threadId, turnId: params.turnId }
+    : null;
+}
+
+function sessionFromAppServerMessage(message: unknown): { threadId: string; turnId: string } | null {
+  if (!isRecord(message) || message.method !== "turn/started" || !isRecord(message.params)) return null;
+  const turn = message.params.turn;
+  return typeof message.params.threadId === "string" && isRecord(turn) && typeof turn.id === "string"
+    ? { threadId: message.params.threadId, turnId: turn.id }
+    : null;
+}
+
+/** Converts versionless server approval/question requests into a safe internal shape. */
+export function normalizeAppServerHumanInputRequest(message: unknown): AppServerHumanInputRequest | null {
+  if (!isRecord(message) || typeof message.method !== "string" || !isRecord(message.params)) return null;
+  const session = readSession(message.params);
+  if (!session) return null;
+  if (typeof message.id !== "string" && typeof message.id !== "number") return null;
+  const requestId = String(message.id);
+  if (message.method === "item/tool/requestUserInput" && Array.isArray(message.params.questions)) {
+    const questions = message.params.questions.filter(isRecord);
+    if (!questions.length || questions.some((question) => typeof question.question !== "string" || typeof question.id !== "string")) return null;
+    const options = questions.flatMap((question) => Array.isArray(question.options)
+      ? question.options.filter(isRecord).map((option) => option.label).filter((label): label is string => typeof label === "string")
+      : []);
+    const normalizedQuestions = questions.map((question) => ({
+      id: question.id as string,
+      header: typeof question.header === "string" ? question.header : "Question",
+      question: question.question as string,
+      options: Array.isArray(question.options)
+        ? question.options.filter(isRecord).map((option) => option.label).filter((label): label is string => typeof label === "string")
+        : [],
+    }));
+    return { ...session, requestId, rpcId: message.id, kind: "QUESTION", prompt: normalizedQuestions.map((question) => question.question).join("\n"), questionIds: normalizedQuestions.map((question) => question.id), questions: normalizedQuestions, ...(options.length ? { options } : {}) };
+  }
+  if (message.method === "item/permissions/requestApproval" && isRecord(message.params.permissions)) {
+    return { ...session, requestId, rpcId: message.id, kind: "PERMISSIONS", prompt: "Codex requests additional permissions.", permissions: message.params.permissions };
+  }
+  if (["item/commandExecution/requestApproval", "item/fileChange/requestApproval"].includes(message.method)) {
+    return { ...session, requestId, rpcId: message.id, kind: "CONFIRMATION", prompt: "Codex requests approval to continue." };
+  }
+  return null;
 }
 
 type DisposableAppServerChild = {
@@ -51,6 +111,9 @@ export interface AppServerTransport {
 export type AppServerRun = {
   completed: Promise<CodexRunCompletion>;
   interrupt(): Promise<void>;
+  respondToHumanInput(request: AppServerHumanInputRequest, response: Omit<CodexHumanInputResponse, "runId" | "requestId">): Promise<void>;
+  abortHumanInput(error: Error): void;
+  session(): { threadId: string; turnId: string };
 };
 
 /** Performs the protocol handshake; launch only succeeds after `turn/start` responds. */
@@ -60,6 +123,7 @@ export async function beginAppServerRun(
 ): Promise<AppServerRun> {
   let nextId = 1;
   const pending = new Map<number, { resolve(value: unknown): void; reject(error: Error): void }>();
+  const pendingServerRequests = new Map<string, { threadId: string; resolve(): void; reject(error: Error): void }>();
   let threadId = "";
   let turnId = "";
   let resolveCompletion!: (result: CodexRunCompletion) => void;
@@ -67,7 +131,17 @@ export async function beginAppServerRun(
 
   transport.onMessage((message) => {
     if (!isRecord(message)) return;
-    if (typeof message.id === "number") {
+    if (message.method === "serverRequest/resolved" && isRecord(message.params)
+      && (typeof message.params.requestId === "string" || typeof message.params.requestId === "number")
+      && typeof message.params.threadId === "string") {
+      const waiter = pendingServerRequests.get(String(message.params.requestId));
+      if (waiter && waiter.threadId === message.params.threadId) {
+        pendingServerRequests.delete(String(message.params.requestId));
+        waiter.resolve();
+      }
+      return;
+    }
+    if (typeof message.id === "number" && ("result" in message || "error" in message)) {
       const request = pending.get(message.id);
       if (!request) return;
       pending.delete(message.id);
@@ -79,6 +153,8 @@ export async function beginAppServerRun(
     const turn = message.params.turn;
     if (!isRecord(turn) || message.params.threadId !== threadId) return;
     const status = turn.status;
+    for (const waiter of pendingServerRequests.values()) waiter.reject(new Error("Codex turn completed before the human-input request was resolved"));
+    pendingServerRequests.clear();
     resolveCompletion(status === "completed" ? { exitCode: 0 } : {
       exitCode: 1,
       error: isRecord(turn.error) && typeof turn.error.message === "string"
@@ -93,6 +169,7 @@ export async function beginAppServerRun(
     transport.send({ jsonrpc: "2.0", id, method, params });
   });
   await request("initialize", { clientInfo: { name: "agentdeck", version: "0.1.0" } });
+  transport.send({ jsonrpc: "2.0", method: "initialized", params: {} });
   const threadResponse = await request("thread/start", { cwd: input.cwd });
   const thread = isRecord(threadResponse) && isRecord(threadResponse.thread) ? threadResponse.thread : undefined;
   if (!thread || typeof thread.id !== "string") throw new Error("Codex app-server did not return a thread id");
@@ -108,33 +185,63 @@ export async function beginAppServerRun(
   return {
     completed,
     interrupt: async () => { await request("turn/interrupt", { threadId, turnId }); },
+    respondToHumanInput: async (inputRequest, response) => {
+      if (inputRequest.kind === "CONFIRMATION") {
+        if (response.action !== "APPROVE" && response.action !== "REJECT") throw new Error("Confirmation requests require approve or reject");
+        return await respondToServerRequest(inputRequest, { decision: response.action === "APPROVE" ? "accept" : "decline" });
+      }
+      if (inputRequest.kind === "PERMISSIONS") {
+        if (response.action !== "APPROVE" && response.action !== "REJECT") throw new Error("Permission requests require approve or reject");
+        return await respondToServerRequest(inputRequest, { permissions: response.action === "APPROVE" ? inputRequest.permissions ?? {} : {} });
+      }
+      if (response.action !== "TEXT" || !inputRequest.questionIds?.length) throw new Error("Question requests require text");
+      const answers = Object.fromEntries(inputRequest.questionIds.map((questionId) => [questionId, { answers: [response.answers?.[questionId] ?? ""] }]));
+      await respondToServerRequest(inputRequest, { answers });
+    },
+    abortHumanInput: (error) => {
+      for (const waiter of pendingServerRequests.values()) waiter.reject(error);
+      pendingServerRequests.clear();
+    },
+    session: () => ({ threadId, turnId }),
   };
+
+  function respondToServerRequest(inputRequest: AppServerHumanInputRequest, result: JsonRecord): Promise<void> {
+    if (pendingServerRequests.has(inputRequest.requestId)) return Promise.reject(new Error(`Human input request ${inputRequest.requestId} is already being delivered`));
+    return new Promise((resolve, reject) => {
+      pendingServerRequests.set(inputRequest.requestId, { threadId: inputRequest.threadId, resolve, reject });
+      transport.send({ jsonrpc: "2.0", id: inputRequest.rpcId, result });
+    });
+  }
 }
 
 type AppServerAdapterOptions = { command?: string; startupTimeoutMs?: number };
-type ManagedProcess = { process: ChildProcessWithoutNullStreams; interrupt(): Promise<void> };
+type ManagedProcess = { process: ChildProcessWithoutNullStreams; supervised: SupervisedProcessHandle; interrupt(): Promise<void>; pendingInputs: Map<string, AppServerHumanInputRequest>; respond(input: CodexHumanInputResponse): Promise<void> };
 
 /** Supervises a complete app-server JSON-RPC turn, not merely a spawned process. */
 export class AppServerAdapter implements CodexAdapter {
   private readonly command: string;
   private readonly startupTimeoutMs: number;
+  private readonly supervisor: SupervisedProcess;
   private readonly processes = new Map<string, ManagedProcess>();
 
   constructor(options: AppServerAdapterOptions = {}) {
     this.command = options.command ?? "codex";
     this.startupTimeoutMs = options.startupTimeoutMs ?? 2_000;
+    this.supervisor = new SupervisedProcess();
   }
 
   async launch(request: CodexRunRequest): Promise<CodexRunHandle> {
-    const child = spawn(this.command, ["app-server", "--stdio"], { cwd: request.cwd, stdio: "pipe", windowsHide: true });
+    const supervised = this.supervisor.start({ command: this.command, args: ["app-server", "--stdio"], cwd: request.cwd });
+    const child = supervised.child;
     let stderr = "";
     let buffer = "";
     let receive: ((message: unknown) => void) | undefined;
+    const pendingInputs = new Map<string, AppServerHumanInputRequest>();
     const transport: AppServerTransport = {
       send: (message) => child.stdin.write(`${JSON.stringify(message)}\n`),
       onMessage: (listener) => { receive = listener; },
     };
-    child.stderr.on("data", (chunk: Buffer) => { stderr = `${stderr}${chunk}`.slice(-8_192); });
+    child.stderr.on("data", (chunk: Buffer) => { const text = chunk.toString(); stderr = `${stderr}${text}`.slice(-8_192); void Promise.resolve(request.onOutput?.({ stream: "stderr", text })); });
     child.stdout.on("data", (chunk: Buffer) => {
       buffer += chunk.toString();
       const lines = buffer.split("\n"); buffer = lines.pop() ?? "";
@@ -143,15 +250,22 @@ export class AppServerAdapter implements CodexAdapter {
         try {
           const message = JSON.parse(line);
           receive?.(message);
+          const session = sessionFromAppServerMessage(message);
+          if (session) void Promise.resolve(request.onSession?.(session));
+          const inputRequest = normalizeAppServerHumanInputRequest(message);
+          if (inputRequest) {
+            pendingInputs.set(inputRequest.requestId, inputRequest);
+            void Promise.resolve(request.onEvent({ type: "human-input/requested", params: inputRequest }));
+          }
           const event = normalizeAppServerNotification(message);
           if (event) void Promise.resolve(request.onEvent(event));
         } catch { void Promise.resolve(request.onEvent({ type: "codex/invalid-json-rpc", params: { line } })); }
       }
     });
-    const processExit = new Promise<CodexRunCompletion>((resolve) => {
-      child.once("error", (error) => resolve({ exitCode: null, error: error.message }));
-      child.once("close", (exitCode) => resolve({ exitCode, error: exitCode === 0 ? undefined : stderr.trim() || `codex app-server exited with ${exitCode}` }));
-    });
+    const processExit = supervised.completed.then((result): CodexRunCompletion => ({
+      exitCode: result.exitCode,
+      error: result.exitCode === 0 ? undefined : stderr.trim() || result.error || `codex app-server exited with ${result.exitCode}`,
+    }));
     const startup = beginAppServerRun(transport, { cwd: request.cwd, prompt: request.prompt });
     let protocol: AppServerRun;
     try {
@@ -164,16 +278,36 @@ export class AppServerAdapter implements CodexAdapter {
       disposeAppServerChild(child);
       throw error;
     }
-    this.processes.set(request.runId, { process: child, interrupt: protocol.interrupt });
+    this.processes.set(request.runId, {
+      process: child,
+      supervised,
+      interrupt: protocol.interrupt,
+      pendingInputs,
+      respond: async (input) => {
+        const pending = pendingInputs.get(input.requestId);
+        if (!pending) throw new Error(`Human input request ${input.requestId} is not pending for run ${input.runId}`);
+        await protocol.respondToHumanInput(pending, input);
+        pendingInputs.delete(input.requestId);
+      },
+    });
+    processExit.then((result) => protocol.abortHumanInput(new Error(result.error ?? "Codex app-server exited before the human-input request resolved"))).catch(() => undefined);
     const completed = Promise.race([protocol.completed, processExit]);
-    completed.finally(() => { this.processes.delete(request.runId); if (!child.killed) child.kill(); }).catch(() => undefined);
-    return { pid: child.pid ?? null, completed };
+    completed.finally(() => { this.processes.delete(request.runId); void supervised.stop(); }).catch(() => undefined);
+    return { pid: supervised.pid, completed, ...protocol.session() };
   }
 
   async stop(runId: string): Promise<void> {
     const managed = this.processes.get(runId);
     if (!managed) throw new Error(`Run ${runId} is not active`);
     await Promise.race([managed.interrupt(), new Promise<void>((resolve) => setTimeout(resolve, 250))]);
-    if (!managed.process.killed) managed.process.kill();
+    await managed.supervised.stop();
+  }
+
+  async respondToHumanInput(input: CodexHumanInputResponse): Promise<void> {
+    const managed = this.processes.get(input.runId);
+    if (!managed || managed.process.killed) {
+      throw new Error(`App-server connection for run ${input.runId} is unavailable; restart the task to recover.`);
+    }
+    await managed.respond(input);
   }
 }

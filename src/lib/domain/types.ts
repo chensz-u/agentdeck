@@ -1,10 +1,63 @@
 export enum TaskStatus {
   TODO = "TODO",
+  CREATING_WORKTREE = "CREATING_WORKTREE",
   RUNNING = "RUNNING",
+  AWAITING_INPUT = "AWAITING_INPUT",
   REVIEW = "REVIEW",
+  MERGE_READY = "MERGE_READY",
   DONE = "DONE",
+  CLEANED = "CLEANED",
   FAILED = "FAILED",
+  WORKTREE_FAILED = "WORKTREE_FAILED",
   CANCELLED = "CANCELLED",
+}
+
+export enum ExecutionMode {
+  CURRENT_WORKSPACE = "CURRENT_WORKSPACE",
+  ISOLATED_WORKTREE = "ISOLATED_WORKTREE",
+}
+
+export enum AgentId {
+  CODEX = "codex",
+  CLAUDE_CODE = "claude-code",
+  OPENCODE = "opencode",
+  CLINE = "cline",
+  CUSTOM_CLI = "custom-cli",
+}
+
+export enum AgentAvailability {
+  AVAILABLE = "AVAILABLE",
+  UNAVAILABLE = "UNAVAILABLE",
+}
+
+export type AgentCapability = "WORKTREE" | "HUMAN_INPUT" | "READ_ONLY_OUTPUT";
+
+export enum WorktreeStatus {
+  CREATING = "CREATING",
+  READY = "READY",
+  FAILED = "FAILED",
+  CLEANING = "CLEANING",
+  CLEANED = "CLEANED",
+  CLEANUP_FAILED = "CLEANUP_FAILED",
+}
+
+export enum RunInputState {
+  IDLE = "IDLE",
+  AWAITING_INPUT = "AWAITING_INPUT",
+  SUBMITTED = "SUBMITTED",
+}
+
+export enum HumanInputAction {
+  REQUEST = "REQUEST",
+  APPROVE = "APPROVE",
+  REJECT = "REJECT",
+  TEXT = "TEXT",
+}
+
+export enum HumanInputDeliveryStatus {
+  PENDING = "PENDING",
+  DELIVERED = "DELIVERED",
+  FAILED = "FAILED",
 }
 
 export enum AgentRunStatus {
@@ -32,6 +85,9 @@ export type Task = {
   title: string;
   prompt: string;
   status: TaskStatus;
+  executionMode?: ExecutionMode;
+  worktreeId?: string | null;
+  agentId?: AgentId;
   createdAt: Date;
   updatedAt: Date;
 };
@@ -47,4 +103,39 @@ export type AgentRun = {
   startedAt: Date;
   finishedAt: Date | null;
   logPath: string | null;
+  threadId?: string | null;
+  turnId?: string | null;
+  inputState?: RunInputState;
+  agentVersion?: string | null;
+  agentAvailability?: AgentAvailability;
+};
+
+export type Worktree = {
+  id: string;
+  taskId: string;
+  projectId: string;
+  projectPath: string;
+  worktreePath: string;
+  taskBranch: string;
+  baselineBranch: string;
+  baselineSha: string;
+  createdAt: Date;
+  status: WorktreeStatus;
+  error: string | null;
+  cleanupRequestedAt: Date | null;
+  cleanedAt: Date | null;
+  cleanupError: string | null;
+};
+
+export type HumanInputAuditEntry = {
+  id: string;
+  sequence: number;
+  taskId: string;
+  runId: string;
+  action: HumanInputAction;
+  requestId: string;
+  payload: unknown;
+  deliveryStatus: HumanInputDeliveryStatus;
+  deliveryError: string | null;
+  createdAt: Date;
 };

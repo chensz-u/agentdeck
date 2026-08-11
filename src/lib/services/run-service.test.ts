@@ -2,13 +2,18 @@ import { describe, expect, it } from "vitest";
 
 import {
   AgentRunStatus,
+  AgentAvailability,
+  AgentId,
+  ExecutionMode,
   TaskStatus,
+  WorktreeStatus,
   type AgentRun,
   type Project,
   type Task,
 } from "../domain/types";
-import type { CodexAdapter, CodexRunRequest } from "../codex/codex-adapter";
-import { RunService, type RunLifecycleRepository } from "./run-service";
+import { AgentRegistry } from "../agents/agent-registry";
+import type { CodexAdapter, CodexHumanInputResponse, CodexRunRequest } from "../codex/codex-adapter";
+import { RunService, type RunHumanInputLifecycle, type RunLifecycleRepository } from "./run-service";
 
 function task(overrides: Partial<Task> = {}): Task {
   return {
@@ -51,13 +56,21 @@ class InMemoryRunRepository implements RunLifecycleRepository {
     return found ? { task: found, project: project() } : null;
   }
 
+  async claimTaskWorktree(id: string) {
+    const found = this.tasks.find((candidate) => candidate.id === id);
+    if (!found) throw new Error(`Task ${id} was not found`);
+    if (found.status !== TaskStatus.TODO) throw new Error(`Task ${id} is not ready to create a worktree`);
+    found.status = TaskStatus.CREATING_WORKTREE;
+    return { task: found, project: project() };
+  }
+
   async claimTaskRun(
     id: string,
     input: Omit<AgentRun, "id" | "startedAt" | "finishedAt" | "taskId">,
   ) {
     const found = this.tasks.find((candidate) => candidate.id === id);
     if (!found) throw new Error(`Task ${id} was not found`);
-    if (found.status !== TaskStatus.TODO) throw new Error(`Task ${id} is not ready to run`);
+    if (found.status !== TaskStatus.TODO && found.status !== TaskStatus.CREATING_WORKTREE) throw new Error(`Task ${id} is not ready to run`);
     const created: AgentRun = {
       ...input,
       taskId: id,
@@ -93,6 +106,12 @@ class InMemoryRunRepository implements RunLifecycleRepository {
     Object.assign(found, update);
   }
 
+  async updateRunSession(id: string, update: Partial<Pick<AgentRun, "threadId" | "turnId" | "inputState">>): Promise<void> {
+    const found = this.runs.find((candidate) => candidate.id === id);
+    if (!found) throw new Error("Run not found");
+    Object.assign(found, update);
+  }
+
   async saveDiff(runId: string, changedPaths: string[], diff: string): Promise<void> {
     this.capturedDiffs.set(runId, { changedPaths, diff });
   }
@@ -106,6 +125,36 @@ class MemoryEvents {
   }
 }
 
+class FakeHumanInput {
+  readonly requests: unknown[] = [];
+  readonly terminals: string[] = [];
+  async recordRequest(input: unknown): Promise<void> { this.requests.push(input); }
+  async markTerminal(runId: string): Promise<void> { this.terminals.push(runId); }
+}
+
+class BlockingHumanInput implements RunHumanInputLifecycle {
+  readonly terminals: string[] = [];
+  private readonly releases: Array<() => void> = [];
+  private readonly markers: Array<() => void> = [];
+
+  async recordRequest(): Promise<void> {}
+
+  markTerminal(runId: string): Promise<void> {
+    this.terminals.push(runId);
+    this.markers.shift()?.();
+    return new Promise((resolve) => this.releases.push(resolve));
+  }
+
+  waitForTerminals(count: number): Promise<void> {
+    if (this.terminals.length >= count) return Promise.resolve();
+    return new Promise((resolve) => this.markers.push(resolve));
+  }
+
+  releaseNext(): void {
+    this.releases.shift()?.();
+  }
+}
+
 class FakeAdapter implements CodexAdapter {
   requests: CodexRunRequest[] = [];
   stopped: string[] = [];
@@ -115,6 +164,8 @@ class FakeAdapter implements CodexAdapter {
     this.requests.push(request);
     return {
       pid: 4321,
+      threadId: "thread-1",
+      turnId: "turn-1",
       completed: new Promise<{ exitCode: number | null; error?: string }>((resolve) => {
         this.resolveCompletion = resolve;
       }),
@@ -125,35 +176,132 @@ class FakeAdapter implements CodexAdapter {
     this.stopped.push(runId);
   }
 
+  async respondToHumanInput(_input: CodexHumanInputResponse): Promise<void> {
+    throw new Error("Human input is not configured for this fake");
+  }
+
   complete(exitCode: number | null, error?: string): void {
     this.resolveCompletion({ exitCode, error });
   }
 }
 
-function createService(adapter = new FakeAdapter()) {
+function createService(adapter = new FakeAdapter(), humanInput?: RunHumanInputLifecycle) {
   const repository = new InMemoryRunRepository();
   const events = new MemoryEvents();
   const git = {
     getChangedPaths: async () => ["note.txt"],
     getDiff: async () => "diff --git a/note.txt b/note.txt",
   };
-  return { adapter, repository, events, service: new RunService({ repository, adapter, events, git }) };
+  return { adapter, repository, events, service: new RunService({ repository, adapter, events, git, humanInput }) };
 }
 
 describe("RunService", () => {
+  it("creates an isolated worktree before launching Codex inside its persisted path", async () => {
+    const adapter = new FakeAdapter();
+    const repository = new InMemoryRunRepository(task({ executionMode: ExecutionMode.ISOLATED_WORKTREE }));
+    const created: string[] = [];
+    const worktree = {
+      id: "worktree-1", taskId: "task-1", projectId: "project-1", projectPath: "C:\\fixture",
+      worktreePath: "C:\\fixture\\.agentdeck\\worktrees\\task-task-1", taskBranch: "agentdeck/task-task-1",
+      baselineBranch: "main", baselineSha: "a".repeat(40), createdAt: new Date(), status: WorktreeStatus.READY,
+      error: null, cleanupRequestedAt: null, cleanedAt: null, cleanupError: null,
+    };
+    const service = new RunService({
+      repository, adapter, events: new MemoryEvents(), git: { getChangedPaths: async () => [], getDiff: async () => "" },
+      worktrees: { create: async (id: string) => { created.push(id); return worktree; } },
+    } as never);
+
+    await service.launch("task-1");
+
+    expect(created).toEqual(["task-1"]);
+    expect(adapter.requests[0].cwd).toBe(worktree.worktreePath);
+  });
+
+  it("records WORKTREE_FAILED without launching Codex when isolated creation fails", async () => {
+    const adapter = new FakeAdapter();
+    const repository = new InMemoryRunRepository(task({ executionMode: ExecutionMode.ISOLATED_WORKTREE }));
+    const service = new RunService({
+      repository, adapter, events: new MemoryEvents(), git: { getChangedPaths: async () => [], getDiff: async () => "" },
+      worktrees: { create: async () => { throw new Error("git worktree add failed"); } },
+    } as never);
+
+    await expect(service.launch("task-1")).rejects.toThrow("git worktree add failed");
+
+    expect(adapter.requests).toEqual([]);
+    expect(repository.tasks[0].status).toBe(TaskStatus.WORKTREE_FAILED);
+    expect(repository.runs).toEqual([]);
+  });
+
+  it("uses the baseline ReviewService result when an isolated run completes", async () => {
+    const adapter = new FakeAdapter();
+    const repository = new InMemoryRunRepository(task({ executionMode: ExecutionMode.ISOLATED_WORKTREE }));
+    const review = { changedPaths: ["isolated.txt"], diff: "baseline diff", commitSummary: "abc isolated change" };
+    const service = new RunService({
+      repository, adapter, events: new MemoryEvents(), git: { getChangedPaths: async () => ["wrong.txt"], getDiff: async () => "wrong diff" },
+      worktrees: { create: async () => ({ worktreePath: "C:\\fixture\\.agentdeck\\worktrees\\task-task-1" }) },
+      reviewService: { getReview: async () => review },
+    } as never);
+
+    const run = await service.launch("task-1");
+    adapter.complete(0);
+    await service.waitForCompletion(run.id);
+
+    expect(repository.tasks[0].status).toBe(TaskStatus.REVIEW);
+    expect(repository.capturedDiffs.get(run.id)).toEqual({ changedPaths: review.changedPaths, diff: review.diff });
+  });
+
   it("launches a task, records the PID, and persists adapter events", async () => {
     const { adapter, events, repository, service } = createService();
 
     const run = await service.launch("task-1");
     await adapter.requests[0].onEvent({ type: "item/started", params: { item: "work" } });
+    await adapter.requests[0].onOutput?.({ stream: "stderr", text: "permission denied token=never-store" });
+    await adapter.requests[0].onSession?.({ threadId: "thread-1", turnId: "turn-2" });
 
-    expect(run).toMatchObject({ taskId: "task-1", status: AgentRunStatus.RUNNING, pid: 4321 });
+    expect(run).toMatchObject({ taskId: "task-1", status: AgentRunStatus.RUNNING, pid: 4321, threadId: "thread-1", turnId: "turn-2" });
     expect(repository.tasks[0].status).toBe(TaskStatus.RUNNING);
     expect(events.events).toContainEqual({
       runId: run.id,
       type: "item/started",
       params: { item: "work" },
     });
+    expect(events.events).toContainEqual({
+      runId: run.id,
+      type: "process/stderr",
+      params: { text: "permission denied token=never-store" },
+    });
+  });
+
+  it("snapshots the verified selected Agent version into the persisted run", async () => {
+    const adapter = new FakeAdapter();
+    const repository = new InMemoryRunRepository(task({ agentId: AgentId.CODEX }));
+    const service = new RunService({
+      repository, adapter, events: new MemoryEvents(), git: { getChangedPaths: async () => [], getDiff: async () => "" },
+      agentRegistry: new AgentRegistry({ codex: { availability: AgentAvailability.AVAILABLE, version: "codex-cli 0.142.0" } }),
+    });
+
+    const run = await service.launch("task-1");
+
+    expect(run).toMatchObject({ agent: AgentId.CODEX, agentVersion: "codex-cli 0.142.0", agentAvailability: AgentAvailability.AVAILABLE });
+  });
+
+  it("routes a server-originated input request into the shared human-input lifecycle before it is streamed", async () => {
+    const adapter = new FakeAdapter();
+    const repository = new InMemoryRunRepository();
+    const events = new MemoryEvents();
+    const humanInput = new FakeHumanInput();
+    const service = new RunService({
+      repository, adapter, events,
+      git: { getChangedPaths: async () => [], getDiff: async () => "" },
+      humanInput,
+    } as never);
+
+    const run = await service.launch("task-1");
+    await adapter.requests[0].onEvent({ type: "human-input/requested", params: { requestId: "server-1", kind: "CONFIRMATION" } });
+
+    expect(humanInput.requests).toEqual([{ taskId: "task-1", runId: run.id, request: { requestId: "server-1", kind: "CONFIRMATION" } }]);
+    await service.stop(run.id);
+    expect(humanInput.terminals).toEqual([run.id]);
   });
 
   it("allows only one concurrent launch for a TODO task", async () => {
@@ -209,10 +357,30 @@ describe("RunService", () => {
     expect(repository.runs[0]).toMatchObject({ status: AgentRunStatus.CANCELLED });
   });
 
+  it("lets stop win when process completion and terminal input cleanup race", async () => {
+    const humanInput = new BlockingHumanInput();
+    const { adapter, repository, service } = createService(new FakeAdapter(), humanInput);
+
+    const run = await service.launch("task-1");
+    adapter.complete(0);
+    await humanInput.waitForTerminals(1);
+    const stopping = service.stop(run.id);
+    await humanInput.waitForTerminals(2);
+
+    humanInput.releaseNext();
+    await service.waitForCompletion(run.id);
+    humanInput.releaseNext();
+    await stopping;
+
+    expect(repository.tasks[0].status).toBe(TaskStatus.CANCELLED);
+    expect(repository.runs[0]).toMatchObject({ status: AgentRunStatus.CANCELLED });
+  });
+
   it("returns a persisted FAILED run when adapter startup fails", async () => {
     const adapter: CodexAdapter = {
       launch: async () => { throw new Error("app-server and fallback unavailable"); },
       stop: async () => undefined,
+      respondToHumanInput: async () => { throw new Error("unavailable"); },
     };
     const { repository, service } = createService(adapter as FakeAdapter);
 

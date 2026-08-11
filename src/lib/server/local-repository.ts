@@ -1,9 +1,26 @@
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { mkdir, rename, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 
-import { AgentRunStatus, TaskStatus, type AgentRun, type Project, type Task } from "../domain/types";
+import {
+  AgentAvailability,
+  AgentId,
+  AgentRunStatus,
+  ExecutionMode,
+  HumanInputAction,
+  HumanInputDeliveryStatus,
+  RunInputState,
+  TaskStatus,
+  WorktreeStatus,
+  type AgentRun,
+  type HumanInputAuditEntry,
+  type Project,
+  type Task,
+  type Worktree,
+} from "../domain/types";
+import { transitionTask } from "../domain/task-state";
 import type { ProjectStore } from "../api/project-route-handlers";
 import type { TaskApiStore } from "../api/task-route-handlers";
 import type { RunLifecycleRepository } from "../services/run-service";
@@ -12,14 +29,22 @@ import type { RegisteredProject } from "../services/project-service";
 type StoredProject = Omit<Project, "createdAt" | "updatedAt"> & { createdAt: string; updatedAt: string };
 type StoredTask = Omit<Task, "createdAt" | "updatedAt"> & { createdAt: string; updatedAt: string };
 type StoredRun = Omit<AgentRun, "startedAt" | "finishedAt"> & { startedAt: string; finishedAt: string | null };
+type StoredWorktree = Omit<Worktree, "createdAt" | "cleanupRequestedAt" | "cleanedAt"> & {
+  createdAt: string;
+  cleanupRequestedAt: string | null;
+  cleanedAt: string | null;
+};
+type StoredHumanInput = Omit<HumanInputAuditEntry, "createdAt"> & { createdAt: string };
 type StoredData = {
   projects: StoredProject[];
   tasks: StoredTask[];
   runs: StoredRun[];
   diffs: Record<string, { changedPaths: string[]; diff: string }>;
+  worktrees: StoredWorktree[];
+  humanInputs: StoredHumanInput[];
 };
 
-const emptyData = (): StoredData => ({ projects: [], tasks: [], runs: [], diffs: {} });
+const emptyData = (): StoredData => ({ projects: [], tasks: [], runs: [], diffs: {}, worktrees: [], humanInputs: [] });
 const restartError = "AgentDeck restarted before this run completed; the process cannot be recovered.";
 
 function asProject(project: StoredProject): Project {
@@ -36,6 +61,19 @@ function asRun(run: StoredRun): AgentRun {
     startedAt: new Date(run.startedAt),
     finishedAt: run.finishedAt ? new Date(run.finishedAt) : null,
   };
+}
+
+function asWorktree(worktree: StoredWorktree): Worktree {
+  return {
+    ...worktree,
+    createdAt: new Date(worktree.createdAt),
+    cleanupRequestedAt: worktree.cleanupRequestedAt ? new Date(worktree.cleanupRequestedAt) : null,
+    cleanedAt: worktree.cleanedAt ? new Date(worktree.cleanedAt) : null,
+  };
+}
+
+function asHumanInput(input: StoredHumanInput): HumanInputAuditEntry {
+  return { ...input, createdAt: new Date(input.createdAt) };
 }
 
 function asRegisteredProject(project: StoredProject): RegisteredProject {
@@ -120,7 +158,15 @@ export class LocalRepository implements ProjectStore, TaskApiStore, RunLifecycle
         throw new Error(`Project ${input.projectId} was not found`);
       }
       const now = new Date().toISOString();
-      const task: StoredTask = { ...input, id: randomUUID(), createdAt: now, updatedAt: now };
+      const task: StoredTask = {
+        ...input,
+        executionMode: input.executionMode ?? ExecutionMode.CURRENT_WORKSPACE,
+        worktreeId: input.worktreeId ?? null,
+        agentId: input.agentId ?? AgentId.CODEX,
+        id: randomUUID(),
+        createdAt: now,
+        updatedAt: now,
+      };
       this.data.tasks.push(task);
       return asTask(task);
     });
@@ -141,13 +187,24 @@ export class LocalRepository implements ProjectStore, TaskApiStore, RunLifecycle
     return this.mutate(() => {
       const task = this.data.tasks.find((candidate) => candidate.id === taskId);
       if (!task) throw new Error(`Task ${taskId} was not found`);
-      if (task.status !== TaskStatus.TODO) throw new Error(`Task ${taskId} is not ready to run`);
+      const isolatedLaunch = task.executionMode === ExecutionMode.ISOLATED_WORKTREE;
+      if (task.status !== TaskStatus.TODO && !(isolatedLaunch && task.status === TaskStatus.CREATING_WORKTREE)) {
+        throw new Error(`Task ${taskId} is not ready to run`);
+      }
+      if (isolatedLaunch && (!task.worktreeId || !this.data.worktrees.some((worktree) => worktree.id === task.worktreeId && worktree.status === WorktreeStatus.READY))) {
+        throw new Error(`Task ${taskId} does not have a ready worktree`);
+      }
       const project = this.data.projects.find((candidate) => candidate.id === task.projectId);
       if (!project) throw new Error(`Project ${task.projectId} was not found`);
 
       const now = new Date().toISOString();
       const run: StoredRun = {
         ...input,
+        threadId: input.threadId ?? null,
+        turnId: input.turnId ?? null,
+        inputState: input.inputState ?? RunInputState.IDLE,
+        agentVersion: input.agentVersion ?? null,
+        agentAvailability: input.agentAvailability ?? AgentAvailability.AVAILABLE,
         id: randomUUID(),
         taskId,
         startedAt: now,
@@ -164,6 +221,11 @@ export class LocalRepository implements ProjectStore, TaskApiStore, RunLifecycle
     return this.mutate(() => {
       const run: StoredRun = {
         ...input,
+        threadId: input.threadId ?? null,
+        turnId: input.turnId ?? null,
+        inputState: input.inputState ?? RunInputState.IDLE,
+        agentVersion: input.agentVersion ?? null,
+        agentAvailability: input.agentAvailability ?? AgentAvailability.AVAILABLE,
         id: randomUUID(),
         startedAt: new Date().toISOString(),
         finishedAt: null,
@@ -174,6 +236,40 @@ export class LocalRepository implements ProjectStore, TaskApiStore, RunLifecycle
   }
 
   async updateTaskStatus(taskId: string, status: TaskStatus): Promise<void> {
+    await this.mutate(() => {
+      const task = this.data.tasks.find((candidate) => candidate.id === taskId);
+      if (!task) throw new Error(`Task ${taskId} was not found`);
+      task.status = transitionTask(task.status, status);
+      task.updatedAt = new Date().toISOString();
+    });
+  }
+
+  /** Atomically reserves a TODO isolated task before its Git worktree is created. */
+  async claimTaskWorktree(taskId: string): Promise<{ task: Task; project: Project }> {
+    return this.mutate(() => {
+      const task = this.data.tasks.find((candidate) => candidate.id === taskId);
+      if (!task) throw new Error(`Task ${taskId} was not found`);
+      if (task.executionMode !== ExecutionMode.ISOLATED_WORKTREE) {
+        throw new Error(`Task ${taskId} is not configured for an isolated worktree`);
+      }
+      if (task.status !== TaskStatus.TODO) throw new Error(`Task ${taskId} is not ready to create a worktree`);
+      const project = this.data.projects.find((candidate) => candidate.id === task.projectId);
+      if (!project) throw new Error(`Project ${task.projectId} was not found`);
+      task.status = TaskStatus.CREATING_WORKTREE;
+      task.updatedAt = new Date().toISOString();
+      return { task: asTask(task), project: asProject(project) };
+    });
+  }
+
+  async findInputContext(taskId: string, runId: string): Promise<{ task: Task; run: AgentRun } | null> {
+    await this.writeQueue;
+    const task = this.data.tasks.find((candidate) => candidate.id === taskId);
+    const run = this.data.runs.find((candidate) => candidate.id === runId && candidate.taskId === taskId);
+    return task && run ? { task: asTask(task), run: asRun(run) } : null;
+  }
+
+  /** Bypasses the public state machine for restart recovery and explicit operator repair. */
+  async forceTaskStatus(taskId: string, status: TaskStatus): Promise<void> {
     await this.mutate(() => {
       const task = this.data.tasks.find((candidate) => candidate.id === taskId);
       if (!task) throw new Error(`Task ${taskId} was not found`);
@@ -197,6 +293,113 @@ export class LocalRepository implements ProjectStore, TaskApiStore, RunLifecycle
     });
   }
 
+  async updateRunSession(
+    runId: string,
+    update: Partial<Pick<AgentRun, "threadId" | "turnId" | "inputState">>,
+  ): Promise<void> {
+    await this.mutate(() => {
+      const run = this.data.runs.find((candidate) => candidate.id === runId);
+      if (!run) throw new Error(`Run ${runId} was not found`);
+      Object.assign(run, update);
+    });
+  }
+
+  async createWorktree(input: Omit<Worktree, "id" | "createdAt">): Promise<Worktree> {
+    return this.mutate(() => {
+      if (!this.data.tasks.some((task) => task.id === input.taskId)) {
+        throw new Error(`Task ${input.taskId} was not found`);
+      }
+      const task = this.data.tasks.find((candidate) => candidate.id === input.taskId)!;
+      if (task.worktreeId || this.data.worktrees.some((worktree) => worktree.taskId === input.taskId)) {
+        throw new Error(`Task ${input.taskId} already has a worktree`);
+      }
+      const worktree: StoredWorktree = {
+        ...input,
+        id: randomUUID(),
+        createdAt: new Date().toISOString(),
+        cleanupRequestedAt: input.cleanupRequestedAt?.toISOString() ?? null,
+        cleanedAt: input.cleanedAt?.toISOString() ?? null,
+      };
+      this.data.worktrees.push(worktree);
+      task.worktreeId = worktree.id;
+      task.updatedAt = worktree.createdAt;
+      return asWorktree(worktree);
+    });
+  }
+
+  async findWorktreeByTaskId(taskId: string): Promise<Worktree | null> {
+    await this.writeQueue;
+    const worktree = this.data.worktrees.find((candidate) => candidate.taskId === taskId);
+    return worktree ? asWorktree(worktree) : null;
+  }
+
+  async claimWorktreeCleanup(worktreeId: string, requestedAt: Date): Promise<Worktree> {
+    return this.mutate(() => {
+      const worktree = this.data.worktrees.find((candidate) => candidate.id === worktreeId);
+      if (!worktree) throw new Error(`Worktree ${worktreeId} was not found`);
+      if (worktree.status !== WorktreeStatus.READY && worktree.status !== WorktreeStatus.CLEANUP_FAILED) {
+        throw new Error(`Worktree ${worktreeId} is not ready for cleanup`);
+      }
+      worktree.status = WorktreeStatus.CLEANING;
+      worktree.cleanupRequestedAt = requestedAt.toISOString();
+      worktree.cleanupError = null;
+      return asWorktree(worktree);
+    });
+  }
+
+  async updateWorktree(
+    worktreeId: string,
+    update: Partial<Omit<Worktree, "id" | "taskId" | "projectId" | "projectPath" | "worktreePath" | "taskBranch" | "baselineBranch" | "baselineSha" | "createdAt">>,
+  ): Promise<void> {
+    await this.mutate(() => {
+      const worktree = this.data.worktrees.find((candidate) => candidate.id === worktreeId);
+      if (!worktree) throw new Error(`Worktree ${worktreeId} was not found`);
+      Object.assign(worktree, update, {
+        cleanupRequestedAt: update.cleanupRequestedAt === undefined
+          ? worktree.cleanupRequestedAt
+          : update.cleanupRequestedAt?.toISOString() ?? null,
+        cleanedAt: update.cleanedAt === undefined ? worktree.cleanedAt : update.cleanedAt?.toISOString() ?? null,
+      });
+    });
+  }
+
+  async appendHumanInput(input: Omit<HumanInputAuditEntry, "id" | "sequence" | "createdAt" | "deliveryStatus" | "deliveryError"> & Partial<Pick<HumanInputAuditEntry, "deliveryStatus" | "deliveryError">>): Promise<HumanInputAuditEntry> {
+    return this.mutate(() => {
+      if (!Object.values(HumanInputAction).includes(input.action)) {
+        throw new Error(`Unsupported human input action: ${input.action}`);
+      }
+      const existing = this.data.humanInputs.find((candidate) => candidate.runId === input.runId && candidate.requestId === input.requestId);
+      if (existing) return asHumanInput(existing);
+      const entry: StoredHumanInput = {
+        ...input,
+        deliveryStatus: input.deliveryStatus ?? (input.action === HumanInputAction.REQUEST ? HumanInputDeliveryStatus.PENDING : HumanInputDeliveryStatus.DELIVERED),
+        deliveryError: input.deliveryError ?? null,
+        id: randomUUID(),
+        sequence: (this.data.humanInputs.at(-1)?.sequence ?? 0) + 1,
+        createdAt: new Date().toISOString(),
+      };
+      this.data.humanInputs.push(entry);
+      return asHumanInput(entry);
+    });
+  }
+
+  async updateHumanInputDelivery(runId: string, requestId: string, status: HumanInputDeliveryStatus, error: string | null): Promise<void> {
+    await this.mutate(() => {
+      const entry = this.data.humanInputs.find((candidate) => candidate.runId === runId && candidate.requestId === requestId);
+      if (!entry) throw new Error(`Human input request ${requestId} was not found for run ${runId}`);
+      entry.deliveryStatus = status;
+      entry.deliveryError = error;
+    });
+  }
+
+  async listHumanInputs(runId: string): Promise<HumanInputAuditEntry[]> {
+    await this.writeQueue;
+    return this.data.humanInputs
+      .filter((input) => input.runId === runId)
+      .sort((left, right) => left.sequence - right.sequence)
+      .map(asHumanInput);
+  }
+
   async saveDiff(runId: string, changedPaths: string[], diff: string): Promise<void> {
     await this.mutate(() => {
       this.data.diffs[runId] = { changedPaths: [...changedPaths], diff };
@@ -212,8 +415,39 @@ export class LocalRepository implements ProjectStore, TaskApiStore, RunLifecycle
       if (!Array.isArray(data.projects) || !Array.isArray(data.tasks) || !Array.isArray(data.runs) || !data.diffs) {
         throw new Error("missing storage collections");
       }
-      const loaded = { projects: data.projects, tasks: data.tasks, runs: data.runs, diffs: data.diffs } as StoredData;
-      if (this.reconcileInterruptedWork(loaded)) this.writeSynchronously(loaded);
+      const storedWorktrees = Array.isArray(data.worktrees) ? data.worktrees : [];
+      const loaded: StoredData = {
+        projects: data.projects,
+        tasks: data.tasks.map((task) => ({
+          ...task,
+          executionMode: task.executionMode ?? ExecutionMode.CURRENT_WORKSPACE,
+          worktreeId: task.worktreeId ?? storedWorktrees.find((worktree) => worktree.taskId === task.id)?.id ?? null,
+          agentId: task.agentId ?? AgentId.CODEX,
+        })),
+        runs: data.runs.map((run) => ({
+          ...run,
+          threadId: run.threadId ?? null,
+          turnId: run.turnId ?? null,
+          inputState: run.inputState ?? RunInputState.IDLE,
+          agentVersion: run.agentVersion ?? null,
+          agentAvailability: run.agentAvailability ?? AgentAvailability.AVAILABLE,
+        })),
+        diffs: data.diffs,
+        worktrees: storedWorktrees,
+        humanInputs: Array.isArray(data.humanInputs) ? data.humanInputs.map((input) => ({
+          ...input,
+          deliveryStatus: input.deliveryStatus ?? (input.action === HumanInputAction.REQUEST ? HumanInputDeliveryStatus.PENDING : HumanInputDeliveryStatus.DELIVERED),
+          deliveryError: input.deliveryError ?? null,
+        })) : [],
+      };
+      const migrated = !Array.isArray(data.worktrees) || !Array.isArray(data.humanInputs)
+        || data.tasks.some((task) => task.executionMode === undefined)
+        || data.tasks.some((task) => task.worktreeId === undefined)
+        || data.tasks.some((task) => task.agentId === undefined)
+        || data.runs.some((run) => run.threadId === undefined || run.turnId === undefined || run.inputState === undefined || run.agentVersion === undefined || run.agentAvailability === undefined)
+        || data.humanInputs?.some((input) => input.deliveryStatus === undefined || input.deliveryError === undefined);
+      const reconciled = this.reconcileInterruptedWork(loaded);
+      if (migrated || reconciled) this.writeSynchronously(loaded);
       return loaded;
     } catch (error) {
       throw new Error(`Unable to read AgentDeck local storage at ${this.filePath}: ${error instanceof Error ? error.message : String(error)}`);
@@ -223,6 +457,7 @@ export class LocalRepository implements ProjectStore, TaskApiStore, RunLifecycle
   private reconcileInterruptedWork(data: StoredData): boolean {
     const now = new Date().toISOString();
     const interruptedTaskIds = new Set<string>();
+    let changed = false;
     for (const run of data.runs) {
       if (run.status !== AgentRunStatus.RUNNING) continue;
       run.status = AgentRunStatus.FAILED;
@@ -230,14 +465,71 @@ export class LocalRepository implements ProjectStore, TaskApiStore, RunLifecycle
       run.finishedAt = now;
       interruptedTaskIds.add(run.taskId);
     }
-    let changed = interruptedTaskIds.size > 0;
+    for (const input of data.humanInputs) {
+      if (input.deliveryStatus !== HumanInputDeliveryStatus.PENDING) continue;
+      input.deliveryStatus = HumanInputDeliveryStatus.FAILED;
+      input.deliveryError = restartError;
+      interruptedTaskIds.add(input.taskId);
+      changed = true;
+    }
+    changed = changed || interruptedTaskIds.size > 0;
     for (const task of data.tasks) {
-      if (task.status !== TaskStatus.RUNNING && !interruptedTaskIds.has(task.id)) continue;
-      task.status = TaskStatus.FAILED;
+      const active = task.status === TaskStatus.RUNNING
+        || task.status === TaskStatus.CREATING_WORKTREE
+        || task.status === TaskStatus.AWAITING_INPUT;
+      if (!active && !interruptedTaskIds.has(task.id)) continue;
+      task.status = task.executionMode === ExecutionMode.ISOLATED_WORKTREE
+        ? TaskStatus.WORKTREE_FAILED
+        : TaskStatus.FAILED;
       task.updatedAt = now;
       changed = true;
     }
+    return this.reconcileInterruptedCleanups(data) || changed;
+  }
+
+  private reconcileInterruptedCleanups(data: StoredData): boolean {
+    let changed = false;
+    for (const worktree of data.worktrees) {
+      if (worktree.status === WorktreeStatus.CLEANED) {
+        changed = this.reconcileCleanedTask(data, worktree) || changed;
+        continue;
+      }
+      if (worktree.status !== WorktreeStatus.CLEANING) continue;
+      const project = data.projects.find((candidate) => candidate.id === worktree.projectId);
+      const expectedPath = project ? resolve(project.path, ".agentdeck", "worktrees", `task-${safeId(worktree.taskId)}`) : null;
+      const managedRecord = project !== undefined && expectedPath !== null
+        ? resolve(worktree.projectPath) === resolve(project.path)
+          && resolve(worktree.worktreePath) === expectedPath
+          && worktree.taskBranch === `agentdeck/task-${safeId(worktree.taskId)}`
+        : false;
+      const worktreePresent = managedRecord && expectedPath !== null && isGitWorktree(expectedPath);
+      const branchPresent = managedRecord && project !== undefined && branchExists(project.path, worktree.taskBranch);
+      if (worktreePresent && branchPresent) {
+        worktree.status = WorktreeStatus.READY;
+        worktree.cleanupError = null;
+      } else if (!worktreePresent && !branchPresent) {
+        worktree.status = WorktreeStatus.CLEANED;
+        worktree.cleanedAt = new Date().toISOString();
+        worktree.cleanupError = null;
+        this.reconcileCleanedTask(data, worktree);
+      } else {
+        worktree.status = WorktreeStatus.CLEANUP_FAILED;
+        worktree.cleanupError = !managedRecord
+          ? "Interrupted cleanup recovery could not verify managed worktree metadata"
+          : `Interrupted cleanup recovery found ${[!worktreePresent && "missing worktree", !branchPresent && "missing branch"].filter(Boolean).join(" and ")}`;
+      }
+      changed = true;
+    }
     return changed;
+  }
+
+  private reconcileCleanedTask(data: StoredData, worktree: StoredWorktree): boolean {
+    const task = data.tasks.find((candidate) => candidate.id === worktree.taskId);
+    if (!task || task.status === TaskStatus.CLEANED) return false;
+    if (![TaskStatus.REVIEW, TaskStatus.MERGE_READY, TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.WORKTREE_FAILED].includes(task.status)) return false;
+    task.status = TaskStatus.CLEANED;
+    task.updatedAt = new Date().toISOString();
+    return true;
   }
 
   private writeSynchronously(data: StoredData): void {
@@ -259,5 +551,27 @@ export class LocalRepository implements ProjectStore, TaskApiStore, RunLifecycle
     this.writeQueue = write.catch(() => undefined);
     await write;
     return result;
+  }
+}
+
+function safeId(value: string): string {
+  return value.trim().replace(/[^A-Za-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").toLowerCase();
+}
+
+function isGitWorktree(path: string): boolean {
+  if (!existsSync(path)) return false;
+  try {
+    return resolve(execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd: path, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim()) === resolve(path);
+  } catch {
+    return false;
+  }
+}
+
+function branchExists(projectPath: string, branch: string): boolean {
+  try {
+    execFileSync("git", ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], { cwd: projectPath, stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
   }
 }

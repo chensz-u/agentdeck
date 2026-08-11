@@ -20,27 +20,36 @@ test("streams a stubbed run, can stop and retry it, then reviews the diff", asyn
 
   try {
     await page.goto("/projects");
-    await page.getByLabel("Project name").fill("Run fixture");
-    await page.getByLabel("Local Git repository path").fill(fixture);
-    await page.getByRole("button", { name: "Add project" }).click();
-    await page.getByLabel("Task title").fill("Review a stubbed run");
-    await page.getByLabel("Task prompt").fill("Use the controlled test adapter.");
-    await page.getByRole("button", { name: "Create task" }).click();
+    await page.getByLabel("项目名称").fill("Run fixture");
+    await page.getByLabel("本地项目路径").fill(fixture);
+    await page.getByRole("button", { name: "登记项目" }).click();
+    await page.getByLabel("任务标题").fill("Review a stubbed run");
+    await page.getByLabel("任务说明").fill("Use the controlled test adapter.");
+    await expect(page.getByRole("radio", { name: "Codex" })).toBeChecked();
+    await expect(page.getByRole("radio", { name: "Claude Code" })).toBeDisabled();
+    await expect(page.getByText("当前版本未接入 Claude Code", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "创建任务" }).click();
+    await expect(page.getByText("Codex", { exact: true })).toBeVisible();
     const projectPath = new URL(page.url()).pathname;
     await page.getByRole("link", { name: "Review a stubbed run" }).click();
-    await expect(page.getByRole("link", { name: "Project workspace" })).toHaveAttribute("href", projectPath);
+    await expect(page.getByRole("link", { name: "返回项目工作区" })).toHaveAttribute("href", projectPath);
 
-    await page.getByRole("button", { name: "Run task" }).click();
-    await expect(page.getByText("RUNNING", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "运行任务" }).click();
+    await expect(page.getByLabel("RUNNING")).toBeVisible();
+    await expect(page.getByText("运行任务 1", { exact: true })).toBeVisible();
     await expect(page.getByText("codex/exec", { exact: true })).toBeVisible();
-    await expect(page.getByText("stubbed activity")).toBeVisible();
-    await page.getByRole("button", { name: "Stop run" }).click();
-    await expect(page.getByText("CANCELLED", { exact: true })).toBeVisible();
+    await expect(page.getByText('{"message":"stubbed activity"}', { exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "运行输出" })).toBeVisible();
+    await expect(page.getByText("受控 Codex 正在执行任务", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "暂停跟随" }).click();
+    await expect(page.getByRole("button", { name: "恢复跟随" })).toBeVisible();
+    await page.getByRole("button", { name: "停止运行" }).click();
+    await expect(page.getByLabel("CANCELLED")).toBeVisible();
 
-    await page.getByRole("button", { name: "Retry task" }).click();
+    await page.getByRole("button", { name: "创建重试任务" }).click();
     await expect(page).toHaveURL(/\/tasks\/.+/);
-    await page.getByRole("button", { name: "Run task" }).click();
-    await expect(page.getByText("REVIEW", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "运行任务" }).click();
+    await expect(page.getByLabel("REVIEW")).toBeVisible();
     await expect(page.getByText("note.txt", { exact: true })).toBeVisible();
     await expect(page.getByText("diff --git a/note.txt b/note.txt")).toBeVisible();
   } finally {

@@ -5,6 +5,8 @@ data/
 .worktrees/
 coverage/
 test-results/
+.playwright-cli/
+output/
 *.tsbuildinfo
 .env*
 !.env.example
