@@ -1,37 +1,91 @@
-import type { CodexAdapter, CodexRunRequest } from "../codex/codex-adapter";
+import { execFileSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+
+import type { CodexAdapter, CodexHumanInputResponse, CodexRunRequest } from "../codex/codex-adapter";
 import { AppServerAdapter } from "../codex/app-server-adapter";
 import { ExecFallbackAdapter, FallbackCodexAdapter } from "../codex/exec-fallback-adapter";
 import { GitService } from "../services/git-service";
 import { RunEventBus } from "../services/run-event-bus";
 import { RunEventStore } from "../services/run-event-store";
 import { RunService } from "../services/run-service";
+import { HumanInputService } from "../services/human-input-service";
 import { TaskService } from "../services/task-service";
+import { TaskLifecycleService } from "../services/task-lifecycle-service";
+import { WorktreeService } from "../services/worktree-service";
+import { ReviewService } from "../services/review-service";
 import { LocalRepository } from "./local-repository";
+import { AgentRegistry } from "../agents/agent-registry";
+import { AgentAvailability } from "../domain/types";
 
 export type ServerComposition = {
   repository: LocalRepository;
   taskService: TaskService;
+  taskLifecycleService: TaskLifecycleService;
   runService: RunService;
+  worktreeService: WorktreeService;
+  reviewService: ReviewService;
+  humanInputService: HumanInputService;
   runEventBus: RunEventBus;
   runEventStore: RunEventStore;
+  agentRegistry: AgentRegistry;
 };
+
+function detectCodex(): { availability: AgentAvailability; version: string | null } {
+  try {
+    const version = execFileSync("codex", ["--version"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    return { availability: AgentAvailability.AVAILABLE, version: version || null };
+  } catch {
+    return { availability: AgentAvailability.UNAVAILABLE, version: null };
+  }
+}
 
 class ControlledE2eAdapter implements CodexAdapter {
   private readonly completions = new Map<string, (result: { exitCode: number }) => void>();
+  private readonly isolatedRuns = new Set<string>();
+  private readonly runCwds = new Map<string, string>();
   private launches = 0;
 
   async launch(request: CodexRunRequest) {
     this.launches += 1;
+    await request.onOutput?.({ stream: "stdout", text: "受控 Codex 正在执行任务" });
     await request.onEvent({ type: "codex/exec", params: { message: "stubbed activity" } });
     const completed = new Promise<{ exitCode: number }>((resolve) => {
       this.completions.set(request.runId, resolve);
     });
-    if (this.launches > 1) setTimeout(() => this.completions.get(request.runId)?.({ exitCode: 0 }), 20);
+    if (request.cwd.includes(".agentdeck")) {
+      this.isolatedRuns.add(request.runId);
+      this.runCwds.set(request.runId, request.cwd);
+      const humanInputRequest = { type: "human-input/requested" as const, params: {
+        requestId: `e2e-input-${request.runId}`, rpcId: `e2e-input-${request.runId}`, kind: "QUESTION",
+        threadId: `e2e-thread-${request.runId}`, turnId: `e2e-turn-${request.runId}`, prompt: "Choose the controlled test response.",
+        questionIds: ["approach", "scope"], questions: [
+          { id: "approach", header: "Approach", question: "Which approach should the task take?", options: ["Contained"] },
+          { id: "scope", header: "Scope", question: "What scope should the task use?", options: ["Only this task"] },
+        ],
+      } };
+      if (process.env.AGENTDECK_E2E_ASYNC_INPUT === "1") {
+        setTimeout(() => { void request.onEvent(humanInputRequest); }, 200);
+      } else await request.onEvent(humanInputRequest);
+    } else if (this.launches > 1) setTimeout(() => this.completions.get(request.runId)?.({ exitCode: 0 }), 20);
     return { pid: 0, completed };
   }
 
   async stop(runId: string): Promise<void> {
     this.completions.get(runId)?.({ exitCode: 0 });
+  }
+
+  async respondToHumanInput(input: CodexHumanInputResponse): Promise<void> {
+    if (!this.completions.has(input.runId)) throw new Error(`Run ${input.runId} is not active`);
+    if (this.isolatedRuns.has(input.runId)) {
+      const cwd = this.runCwds.get(input.runId);
+      if (!cwd) throw new Error(`Run ${input.runId} has no isolated workspace`);
+      writeFileSync(join(cwd, "staged.txt"), "staged review fixture\n");
+      execFileSync("git", ["add", "staged.txt"], { cwd, stdio: "ignore" });
+      writeFileSync(join(cwd, "unstaged.txt"), "unstaged review fixture\n");
+      writeFileSync(join(cwd, "untracked.txt"), "untracked review fixture\n");
+      setTimeout(() => this.completions.get(input.runId)?.({ exitCode: 0 }), 20);
+    }
   }
 }
 
@@ -39,17 +93,33 @@ function createServerComposition(): ServerComposition {
   const repository = new LocalRepository(process.env.AGENTDECK_DATA_PATH || undefined);
   const runEventBus = new RunEventBus();
   const runEventStore = new RunEventStore({ bus: runEventBus });
+  const adapter: CodexAdapter = process.env.AGENTDECK_E2E_STUB === "1"
+    ? new ControlledE2eAdapter()
+    : new FallbackCodexAdapter(new AppServerAdapter(), new ExecFallbackAdapter());
+  const humanInputService = new HumanInputService({ repository, adapter });
+  const agentRegistry = new AgentRegistry({ codex: process.env.AGENTDECK_E2E_STUB === "1"
+    ? { availability: AgentAvailability.AVAILABLE, version: "controlled-e2e" }
+    : detectCodex() });
+  const worktreeService = new WorktreeService({ repository });
+  const reviewService = new ReviewService({ repository });
   return {
     repository,
+    agentRegistry,
     taskService: new TaskService(repository),
+    taskLifecycleService: new TaskLifecycleService(repository),
+    worktreeService,
+    reviewService,
     runService: new RunService({
       repository,
-      adapter: process.env.AGENTDECK_E2E_STUB === "1"
-        ? new ControlledE2eAdapter()
-        : new FallbackCodexAdapter(new AppServerAdapter(), new ExecFallbackAdapter()),
+      adapter,
       events: runEventStore,
       git: new GitService(),
+      humanInput: humanInputService,
+      worktrees: worktreeService,
+      reviewService,
+      agentRegistry,
     }),
+    humanInputService,
     runEventBus,
     runEventStore,
   };

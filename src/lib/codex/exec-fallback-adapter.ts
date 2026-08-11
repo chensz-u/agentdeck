@@ -1,27 +1,26 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-
-import type { CodexAdapter, CodexRunCompletion, CodexRunHandle, CodexRunRequest } from "./codex-adapter";
+import type { CodexAdapter, CodexHumanInputResponse, CodexRunCompletion, CodexRunHandle, CodexRunRequest } from "./codex-adapter";
+import { SupervisedProcess, type SupervisedProcessHandle } from "../runtime/supervised-process";
 
 /** Uses Codex's newline-delimited JSON mode when app-server cannot start. */
 export class ExecFallbackAdapter implements CodexAdapter {
   private readonly command: string;
-  private readonly processes = new Map<string, ChildProcessWithoutNullStreams>();
+  private readonly processes = new Map<string, SupervisedProcessHandle>();
+  private readonly supervisor = new SupervisedProcess();
 
   constructor(command = "codex") {
     this.command = command;
   }
 
   async launch(request: CodexRunRequest): Promise<CodexRunHandle> {
-    const child = spawn(this.command, ["exec", "--json", request.prompt], {
-      cwd: request.cwd,
-      stdio: "pipe",
-      windowsHide: true,
-    });
+    const supervised = this.supervisor.start({ command: this.command, args: ["exec", "--json", request.prompt], cwd: request.cwd });
+    const child = supervised.child;
     let stderr = "";
     let buffer = "";
 
     child.stderr.on("data", (chunk: Buffer) => {
-      stderr = `${stderr}${chunk.toString()}`.slice(-8_192);
+      const text = chunk.toString();
+      stderr = `${stderr}${text}`.slice(-8_192);
+      void Promise.resolve(request.onOutput?.({ stream: "stderr", text }));
     });
     child.stdout.on("data", (chunk: Buffer) => {
       buffer += chunk.toString();
@@ -37,22 +36,23 @@ export class ExecFallbackAdapter implements CodexAdapter {
       }
     });
 
-    const completed = new Promise<CodexRunCompletion>((resolve) => {
-      child.once("error", (error) => resolve({ exitCode: null, error: error.message }));
-      child.once("close", (exitCode) => resolve({
-        exitCode,
-        error: exitCode === 0 ? undefined : stderr.trim() || `codex exec exited with ${exitCode}`,
-      }));
-    });
-    this.processes.set(request.runId, child);
+    const completed = supervised.completed.then((result): CodexRunCompletion => ({
+      exitCode: result.exitCode,
+      error: result.exitCode === 0 ? undefined : stderr.trim() || result.error || `codex exec exited with ${result.exitCode}`,
+    }));
+    this.processes.set(request.runId, supervised);
     completed.finally(() => this.processes.delete(request.runId)).catch(() => undefined);
-    return { pid: child.pid ?? null, completed };
+    return { pid: supervised.pid, completed };
   }
 
   async stop(runId: string): Promise<void> {
     const child = this.processes.get(runId);
     if (!child) throw new Error(`Run ${runId} is not active`);
-    child.kill();
+    await child.stop();
+  }
+
+  async respondToHumanInput(input: CodexHumanInputResponse): Promise<void> {
+    throw new Error(`Codex exec fallback cannot respond to human input for run ${input.runId}; restart the task to recover.`);
   }
 }
 
@@ -85,5 +85,11 @@ export class FallbackCodexAdapter implements CodexAdapter {
     const adapter = this.active.get(runId);
     if (!adapter) throw new Error(`Run ${runId} is not active`);
     await adapter.stop(runId);
+  }
+
+  async respondToHumanInput(input: CodexHumanInputResponse): Promise<void> {
+    const adapter = this.active.get(input.runId);
+    if (!adapter) throw new Error(`Run ${input.runId} has no live Codex connection; restart the task to recover.`);
+    await adapter.respondToHumanInput(input);
   }
 }

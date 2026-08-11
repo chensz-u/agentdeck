@@ -1,9 +1,14 @@
-import { AgentRunStatus, TaskStatus, type AgentRun, type Project, type Task } from "../domain/types";
+import { AgentAvailability, AgentId, AgentRunStatus, ExecutionMode, TaskStatus, type AgentRun, type Project, type Task, type Worktree } from "../domain/types";
 import type { CodexAdapter, CodexRunCompletion } from "../codex/codex-adapter";
+import type { AppServerHumanInputRequest } from "../codex/app-server-adapter";
+import type { HumanInputRequestRecord } from "./human-input-service";
 import type { RunEventInput } from "./run-event-store";
+import { AgentRegistry } from "../agents/agent-registry";
 
 export interface RunLifecycleRepository {
   findTaskWithProject(taskId: string): Promise<{ task: Task; project: Project } | null>;
+  /** Atomically transitions an isolated TODO task to CREATING_WORKTREE. */
+  claimTaskWorktree?(taskId: string): Promise<{ task: Task; project: Project }>;
   claimTaskRun(
     taskId: string,
     input: Omit<AgentRun, "id" | "startedAt" | "finishedAt" | "taskId">,
@@ -14,6 +19,7 @@ export interface RunLifecycleRepository {
     runId: string,
     update: Partial<Pick<AgentRun, "pid" | "status" | "exitCode" | "error" | "finishedAt">>,
   ): Promise<void>;
+  updateRunSession?(runId: string, update: Partial<Pick<AgentRun, "threadId" | "turnId" | "inputState">>): Promise<void>;
   saveDiff(runId: string, changedPaths: string[], diff: string): Promise<void>;
 }
 
@@ -24,6 +30,19 @@ export type RunEventWriter = {
 export type RunGitService = {
   getChangedPaths(project: Pick<Project, "path" | "gitEnabled">): Promise<string[]>;
   getDiff(project: Pick<Project, "path" | "gitEnabled">): Promise<string>;
+};
+
+export type RunHumanInputLifecycle = {
+  recordRequest(input: HumanInputRequestRecord): Promise<unknown>;
+  markTerminal(runId: string): Promise<void>;
+};
+
+export type RunWorktreeLifecycle = {
+  create(taskId: string): Promise<Pick<Worktree, "worktreePath">>;
+};
+
+export type RunReviewLifecycle = {
+  getReview(taskId: string): Promise<{ changedPaths: string[]; diff: string }>;
 };
 
 type ActiveRun = {
@@ -38,6 +57,10 @@ type RunServiceOptions = {
   adapter: CodexAdapter;
   events: RunEventWriter;
   git: RunGitService;
+  humanInput?: RunHumanInputLifecycle;
+  worktrees?: RunWorktreeLifecycle;
+  reviewService?: RunReviewLifecycle;
+  agentRegistry?: AgentRegistry;
   now?: () => Date;
 };
 
@@ -51,8 +74,26 @@ export class RunService {
   }
 
   async launch(taskId: string): Promise<AgentRun> {
+    const initial = await this.options.repository.findTaskWithProject(taskId);
+    if (!initial) throw new Error(`Task ${taskId} was not found`);
+    let isolatedWorktreePath: string | null = null;
+    if (initial.task.executionMode === ExecutionMode.ISOLATED_WORKTREE) {
+      if (!this.options.repository.claimTaskWorktree || !this.options.worktrees) {
+        throw new Error("Isolated worktree launch is not configured");
+      }
+      await this.options.repository.claimTaskWorktree(taskId);
+      try {
+        isolatedWorktreePath = (await this.options.worktrees.create(taskId)).worktreePath;
+      } catch (error) {
+        await this.options.repository.updateTaskStatus(taskId, TaskStatus.WORKTREE_FAILED);
+        throw error;
+      }
+    }
+    const agent = this.options.agentRegistry?.requireAvailable(initial.task.agentId ?? AgentId.CODEX);
     const context = await this.options.repository.claimTaskRun(taskId, {
-      agent: "codex",
+      agent: agent?.id ?? initial.task.agentId ?? AgentId.CODEX,
+      agentVersion: agent?.version ?? null,
+      agentAvailability: agent?.availability ?? AgentAvailability.AVAILABLE,
       status: AgentRunStatus.RUNNING,
       pid: null,
       exitCode: null,
@@ -66,13 +107,33 @@ export class RunService {
       const handle = await this.options.adapter.launch({
         runId: run.id,
         prompt: context.task.prompt,
-        cwd: context.project.path,
+        cwd: isolatedWorktreePath ?? context.project.path,
+        onSession: async (session) => {
+          run.threadId = session.threadId;
+          run.turnId = session.turnId;
+          await this.options.repository.updateRunSession?.(run.id, session);
+        },
         onEvent: async (event) => {
+          if (event.type === "human-input/requested") {
+            await this.options.humanInput?.recordRequest({
+              taskId: context.task.id,
+              runId: run.id,
+              request: event.params as AppServerHumanInputRequest,
+            });
+          }
           await this.options.events.append(run.id, event);
+        },
+        onOutput: async (output) => {
+          await this.options.events.append(run.id, { type: `process/${output.stream}`, params: { text: output.text } });
         },
       });
       run.pid = handle.pid;
       await this.options.repository.updateRun(run.id, { pid: handle.pid });
+      if (handle.threadId || handle.turnId) {
+        run.threadId = handle.threadId ?? run.threadId ?? null;
+        run.turnId = handle.turnId ?? run.turnId ?? null;
+        await this.options.repository.updateRunSession?.(run.id, { threadId: run.threadId, turnId: run.turnId });
+      }
       const active: ActiveRun = {
         ...context,
         cancelled: false,
@@ -97,6 +158,7 @@ export class RunService {
     const active = this.active.get(runId);
     if (!active) throw new Error(`Run ${runId} is not active`);
     active.cancelled = true;
+    await this.options.humanInput?.markTerminal(runId);
     await this.options.events.append(runId, { type: "run/cancelling", params: {} });
     await this.options.adapter.stop(runId);
   }
@@ -116,6 +178,7 @@ export class RunService {
   }
 
   private async finalize(run: AgentRun, active: ActiveRun, result: CodexRunCompletion): Promise<void> {
+    await this.options.humanInput?.markTerminal(run.id);
     const finishedAt = this.now();
     let runStatus = AgentRunStatus.FAILED;
     let taskStatus = TaskStatus.FAILED;
@@ -127,11 +190,15 @@ export class RunService {
       error = null;
     } else if (result.exitCode === 0) {
       try {
+        const isolated = active.task.executionMode === ExecutionMode.ISOLATED_WORKTREE;
         const project = { path: active.project.path, gitEnabled: active.project.gitEnabled };
-        const [changedPaths, diff] = await Promise.all([
-          this.options.git.getChangedPaths(project),
-          this.options.git.getDiff(project),
-        ]);
+        const review = isolated ? await this.requireReviewService().getReview(run.taskId) : null;
+        const [changedPaths, diff] = review
+          ? [review.changedPaths, review.diff]
+          : await Promise.all([
+            this.options.git.getChangedPaths(project),
+            this.options.git.getDiff(project),
+          ]);
         await this.options.repository.saveDiff(run.id, changedPaths, diff);
         runStatus = AgentRunStatus.SUCCEEDED;
         taskStatus = TaskStatus.REVIEW;
@@ -152,5 +219,10 @@ export class RunService {
       params: { status: runStatus, exitCode: result.exitCode, error },
     });
     this.active.delete(run.id);
+  }
+
+  private requireReviewService(): RunReviewLifecycle {
+    if (!this.options.reviewService) throw new Error("Isolated worktree review is not configured");
+    return this.options.reviewService;
   }
 }

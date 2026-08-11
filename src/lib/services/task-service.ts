@@ -1,4 +1,4 @@
-import { TaskStatus, type Task } from "../domain/types";
+import { AgentId, ExecutionMode, TaskStatus, type Task } from "../domain/types";
 
 export interface TaskRepository {
   findTask(id: string): Promise<Task | null>;
@@ -8,11 +8,14 @@ export interface TaskRepository {
 export class TaskService {
   constructor(private readonly repository: TaskRepository) {}
 
-  async createTask(input: Pick<Task, "projectId" | "title" | "prompt">): Promise<Task> {
+  async createTask(input: Pick<Task, "projectId" | "title" | "prompt" | "executionMode" | "agentId">): Promise<Task> {
     return this.repository.createTask({
       ...input,
       parentTaskId: null,
       status: TaskStatus.TODO,
+      executionMode: input.executionMode ?? ExecutionMode.CURRENT_WORKSPACE,
+      worktreeId: null,
+      agentId: input.agentId ?? AgentId.CODEX,
     });
   }
 
@@ -29,6 +32,9 @@ export class TaskService {
       title: original.title,
       prompt: original.prompt,
       status: TaskStatus.TODO,
+      executionMode: original.executionMode,
+      worktreeId: null,
+      agentId: original.agentId ?? AgentId.CODEX,
     });
   }
 }

@@ -27,7 +27,7 @@ export function ProjectCreateForm({ onCreated }: { onCreated: (project: Workspac
     const body = await response.json() as WorkspaceProject & { error?: string };
     setSubmitting(false);
     if (!response.ok) {
-      setError(body.error ?? "Unable to add this project.");
+      setError(body.error ?? "无法登记这个项目。");
       return;
     }
     setName("");
@@ -38,14 +38,14 @@ export function ProjectCreateForm({ onCreated }: { onCreated: (project: Workspac
   return (
     <form className="compact-form" onSubmit={submit}>
       <label>
-        Project name
-        <input value={name} onChange={(event) => setName(event.target.value)} required />
+        项目名称
+        <input name="project-name" autoComplete="off" value={name} onChange={(event) => setName(event.target.value)} required />
       </label>
       <label className="form-field-wide">
-        Local Git repository path
-        <input value={path} onChange={(event) => setPath(event.target.value)} required placeholder="C:\\work\\repository" />
+        本地项目路径
+        <input name="project-path" autoComplete="off" value={path} onChange={(event) => setPath(event.target.value)} required placeholder="C:\\workspace\\repository" />
       </label>
-      <button type="submit" disabled={submitting}>{submitting ? "Adding…" : "Add project"}</button>
+      <button type="submit" disabled={submitting}>{submitting ? "正在登记…" : "登记项目"}</button>
       {error && <p className="form-error" role="alert">{error}</p>}
     </form>
   );
