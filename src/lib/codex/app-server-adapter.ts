@@ -1,8 +1,9 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
 
 import { parseCodexEvent } from "./protocol";
 import type { CodexAdapter, CodexHumanInputResponse, CodexRunCompletion, CodexRunHandle, CodexRunRequest } from "./codex-adapter";
 import type { CodexEvent } from "./protocol";
+import { SupervisedProcess, type SupervisedProcessHandle } from "../runtime/supervised-process";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -214,21 +215,24 @@ export async function beginAppServerRun(
 }
 
 type AppServerAdapterOptions = { command?: string; startupTimeoutMs?: number };
-type ManagedProcess = { process: ChildProcessWithoutNullStreams; interrupt(): Promise<void>; pendingInputs: Map<string, AppServerHumanInputRequest>; respond(input: CodexHumanInputResponse): Promise<void> };
+type ManagedProcess = { process: ChildProcessWithoutNullStreams; supervised: SupervisedProcessHandle; interrupt(): Promise<void>; pendingInputs: Map<string, AppServerHumanInputRequest>; respond(input: CodexHumanInputResponse): Promise<void> };
 
 /** Supervises a complete app-server JSON-RPC turn, not merely a spawned process. */
 export class AppServerAdapter implements CodexAdapter {
   private readonly command: string;
   private readonly startupTimeoutMs: number;
+  private readonly supervisor: SupervisedProcess;
   private readonly processes = new Map<string, ManagedProcess>();
 
   constructor(options: AppServerAdapterOptions = {}) {
     this.command = options.command ?? "codex";
     this.startupTimeoutMs = options.startupTimeoutMs ?? 2_000;
+    this.supervisor = new SupervisedProcess();
   }
 
   async launch(request: CodexRunRequest): Promise<CodexRunHandle> {
-    const child = spawn(this.command, ["app-server", "--stdio"], { cwd: request.cwd, stdio: "pipe", windowsHide: true });
+    const supervised = this.supervisor.start({ command: this.command, args: ["app-server", "--stdio"], cwd: request.cwd });
+    const child = supervised.child;
     let stderr = "";
     let buffer = "";
     let receive: ((message: unknown) => void) | undefined;
@@ -237,7 +241,7 @@ export class AppServerAdapter implements CodexAdapter {
       send: (message) => child.stdin.write(`${JSON.stringify(message)}\n`),
       onMessage: (listener) => { receive = listener; },
     };
-    child.stderr.on("data", (chunk: Buffer) => { stderr = `${stderr}${chunk}`.slice(-8_192); });
+    child.stderr.on("data", (chunk: Buffer) => { const text = chunk.toString(); stderr = `${stderr}${text}`.slice(-8_192); void Promise.resolve(request.onOutput?.({ stream: "stderr", text })); });
     child.stdout.on("data", (chunk: Buffer) => {
       buffer += chunk.toString();
       const lines = buffer.split("\n"); buffer = lines.pop() ?? "";
@@ -258,10 +262,10 @@ export class AppServerAdapter implements CodexAdapter {
         } catch { void Promise.resolve(request.onEvent({ type: "codex/invalid-json-rpc", params: { line } })); }
       }
     });
-    const processExit = new Promise<CodexRunCompletion>((resolve) => {
-      child.once("error", (error) => resolve({ exitCode: null, error: error.message }));
-      child.once("close", (exitCode) => resolve({ exitCode, error: exitCode === 0 ? undefined : stderr.trim() || `codex app-server exited with ${exitCode}` }));
-    });
+    const processExit = supervised.completed.then((result): CodexRunCompletion => ({
+      exitCode: result.exitCode,
+      error: result.exitCode === 0 ? undefined : stderr.trim() || result.error || `codex app-server exited with ${result.exitCode}`,
+    }));
     const startup = beginAppServerRun(transport, { cwd: request.cwd, prompt: request.prompt });
     let protocol: AppServerRun;
     try {
@@ -276,6 +280,7 @@ export class AppServerAdapter implements CodexAdapter {
     }
     this.processes.set(request.runId, {
       process: child,
+      supervised,
       interrupt: protocol.interrupt,
       pendingInputs,
       respond: async (input) => {
@@ -287,15 +292,15 @@ export class AppServerAdapter implements CodexAdapter {
     });
     processExit.then((result) => protocol.abortHumanInput(new Error(result.error ?? "Codex app-server exited before the human-input request resolved"))).catch(() => undefined);
     const completed = Promise.race([protocol.completed, processExit]);
-    completed.finally(() => { this.processes.delete(request.runId); if (!child.killed) child.kill(); }).catch(() => undefined);
-    return { pid: child.pid ?? null, completed, ...protocol.session() };
+    completed.finally(() => { this.processes.delete(request.runId); void supervised.stop(); }).catch(() => undefined);
+    return { pid: supervised.pid, completed, ...protocol.session() };
   }
 
   async stop(runId: string): Promise<void> {
     const managed = this.processes.get(runId);
     if (!managed) throw new Error(`Run ${runId} is not active`);
     await Promise.race([managed.interrupt(), new Promise<void>((resolve) => setTimeout(resolve, 250))]);
-    if (!managed.process.killed) managed.process.kill();
+    await managed.supervised.stop();
   }
 
   async respondToHumanInput(input: CodexHumanInputResponse): Promise<void> {

@@ -7,6 +7,7 @@ export type CodexRunRequest = {
   cwd: string;
   onEvent(event: CodexEvent): Promise<void> | void;
   onSession?(session: { threadId: string; turnId: string }): Promise<void> | void;
+  onOutput?(record: { stream: "stdout" | "stderr"; text: string }): Promise<void> | void;
 };
 
 export type CodexRunCompletion = {
