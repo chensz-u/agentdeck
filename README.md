@@ -59,6 +59,14 @@ If the process exits, AgentDeck restarts, or delivery fails, it records the fail
 
 **Clean worktree** is also explicit. It is offered only after a terminal/review state (`REVIEW`, `MERGE_READY`, `DONE`, `FAILED`, `CANCELLED`, or `WORKTREE_FAILED`) and refuses a worktree with uncommitted changes. A clean removal deletes only the managed task worktree and its derived `agentdeck/task-<task-id>` branch. If cleanup is partial or fails, AgentDeck preserves a `CLEANUP_FAILED` recovery record instead of silently deleting more state.
 
+## V3 Agent console and read-only output
+
+V3 introduces a small, server-owned Agent catalog. **Codex is the only AgentDeck adapter that can run tasks today**. Its availability and detected CLI version are recorded with each run. Claude Code, OpenCode, Cline, and Custom CLI appear only as unavailable placeholders; AgentDeck neither downloads, starts, nor accepts browser-provided commands for them.
+
+Each run is supervised locally: AgentDeck records its PID, lifecycle result, exit code, timestamps, and safe stdout/stderr records. Process output and Codex notifications are appended to `.agentdeck/runs/<run-id>.jsonl` and replayed through the existing SSE endpoint. The task-detail **运行输出** panel is intentionally read-only: it supports following, pausing, and copying captured output, but does not offer a shell, PTY, environment editor, or arbitrary command input.
+
+All cwd values, command vectors, worktree paths, Git operations, app-server thread/turn identifiers, and human-input protocol replies remain server-derived. Output is redacted using the existing credential-shaped event redaction before persistence and streaming. A restart never claims to resume a lost process; the persisted recovery rules described above remain in force.
+
 ## Local security boundaries
 
 This MVP deliberately has a narrow local trust boundary:
