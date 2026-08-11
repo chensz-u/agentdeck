@@ -120,6 +120,9 @@ export class RunService {
           }
           await this.options.events.append(run.id, event);
         },
+        onOutput: async (output) => {
+          await this.options.events.append(run.id, { type: `process/${output.stream}`, params: { text: output.text } });
+        },
       });
       run.pid = handle.pid;
       await this.options.repository.updateRun(run.id, { pid: handle.pid });

@@ -252,6 +252,7 @@ describe("RunService", () => {
 
     const run = await service.launch("task-1");
     await adapter.requests[0].onEvent({ type: "item/started", params: { item: "work" } });
+    await adapter.requests[0].onOutput?.({ stream: "stderr", text: "permission denied token=never-store" });
     await adapter.requests[0].onSession?.({ threadId: "thread-1", turnId: "turn-2" });
 
     expect(run).toMatchObject({ taskId: "task-1", status: AgentRunStatus.RUNNING, pid: 4321, threadId: "thread-1", turnId: "turn-2" });
@@ -260,6 +261,11 @@ describe("RunService", () => {
       runId: run.id,
       type: "item/started",
       params: { item: "work" },
+    });
+    expect(events.events).toContainEqual({
+      runId: run.id,
+      type: "process/stderr",
+      params: { text: "permission denied token=never-store" },
     });
   });
 
