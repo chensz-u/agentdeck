@@ -1,4 +1,4 @@
-import { AgentRunStatus, ExecutionMode, TaskStatus, type AgentRun, type Project, type Task, type Worktree } from "../domain/types";
+import { AgentAvailability, AgentId, AgentRunStatus, ExecutionMode, TaskStatus, type AgentRun, type Project, type Task, type Worktree } from "../domain/types";
 import type { CodexAdapter, CodexRunCompletion } from "../codex/codex-adapter";
 import type { AppServerHumanInputRequest } from "../codex/app-server-adapter";
 import type { HumanInputRequestRecord } from "./human-input-service";
@@ -88,7 +88,9 @@ export class RunService {
       }
     }
     const context = await this.options.repository.claimTaskRun(taskId, {
-      agent: "codex",
+      agent: initial.task.agentId ?? AgentId.CODEX,
+      agentVersion: null,
+      agentAvailability: AgentAvailability.AVAILABLE,
       status: AgentRunStatus.RUNNING,
       pid: null,
       exitCode: null,

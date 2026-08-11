@@ -5,6 +5,8 @@ import { dirname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 
 import {
+  AgentAvailability,
+  AgentId,
   AgentRunStatus,
   ExecutionMode,
   HumanInputAction,
@@ -160,6 +162,7 @@ export class LocalRepository implements ProjectStore, TaskApiStore, RunLifecycle
         ...input,
         executionMode: input.executionMode ?? ExecutionMode.CURRENT_WORKSPACE,
         worktreeId: input.worktreeId ?? null,
+        agentId: input.agentId ?? AgentId.CODEX,
         id: randomUUID(),
         createdAt: now,
         updatedAt: now,
@@ -200,6 +203,8 @@ export class LocalRepository implements ProjectStore, TaskApiStore, RunLifecycle
         threadId: input.threadId ?? null,
         turnId: input.turnId ?? null,
         inputState: input.inputState ?? RunInputState.IDLE,
+        agentVersion: input.agentVersion ?? null,
+        agentAvailability: input.agentAvailability ?? AgentAvailability.AVAILABLE,
         id: randomUUID(),
         taskId,
         startedAt: now,
@@ -219,6 +224,8 @@ export class LocalRepository implements ProjectStore, TaskApiStore, RunLifecycle
         threadId: input.threadId ?? null,
         turnId: input.turnId ?? null,
         inputState: input.inputState ?? RunInputState.IDLE,
+        agentVersion: input.agentVersion ?? null,
+        agentAvailability: input.agentAvailability ?? AgentAvailability.AVAILABLE,
         id: randomUUID(),
         startedAt: new Date().toISOString(),
         finishedAt: null,
@@ -415,12 +422,15 @@ export class LocalRepository implements ProjectStore, TaskApiStore, RunLifecycle
           ...task,
           executionMode: task.executionMode ?? ExecutionMode.CURRENT_WORKSPACE,
           worktreeId: task.worktreeId ?? storedWorktrees.find((worktree) => worktree.taskId === task.id)?.id ?? null,
+          agentId: task.agentId ?? AgentId.CODEX,
         })),
         runs: data.runs.map((run) => ({
           ...run,
           threadId: run.threadId ?? null,
           turnId: run.turnId ?? null,
           inputState: run.inputState ?? RunInputState.IDLE,
+          agentVersion: run.agentVersion ?? null,
+          agentAvailability: run.agentAvailability ?? AgentAvailability.AVAILABLE,
         })),
         diffs: data.diffs,
         worktrees: storedWorktrees,
@@ -433,7 +443,8 @@ export class LocalRepository implements ProjectStore, TaskApiStore, RunLifecycle
       const migrated = !Array.isArray(data.worktrees) || !Array.isArray(data.humanInputs)
         || data.tasks.some((task) => task.executionMode === undefined)
         || data.tasks.some((task) => task.worktreeId === undefined)
-        || data.runs.some((run) => run.threadId === undefined || run.turnId === undefined || run.inputState === undefined)
+        || data.tasks.some((task) => task.agentId === undefined)
+        || data.runs.some((run) => run.threadId === undefined || run.turnId === undefined || run.inputState === undefined || run.agentVersion === undefined || run.agentAvailability === undefined)
         || data.humanInputs?.some((input) => input.deliveryStatus === undefined || input.deliveryError === undefined);
       const reconciled = this.reconcileInterruptedWork(loaded);
       if (migrated || reconciled) this.writeSynchronously(loaded);

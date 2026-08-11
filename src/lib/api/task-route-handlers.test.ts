@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { ExecutionMode, HumanInputAction, HumanInputDeliveryStatus, TaskStatus, WorktreeStatus, type Task } from "../domain/types";
+import { AgentAvailability, AgentId, ExecutionMode, HumanInputAction, HumanInputDeliveryStatus, TaskStatus, WorktreeStatus, type Task } from "../domain/types";
+import { AgentRegistry } from "../agents/agent-registry";
 import {
   createDashboardRouteHandlers,
   createTaskRouteHandlers,
@@ -85,6 +86,19 @@ describe("task API handlers", () => {
     );
 
     expect(response.status).toBe(400);
+  });
+
+  it("rejects a browser request for an unavailable agent", async () => {
+    const registry = new AgentRegistry({ codex: { availability: AgentAvailability.AVAILABLE, version: "0.142.0" } });
+    const response = await createTaskRouteHandlers(new InMemoryTaskApiStore(), registry).POST(
+      new Request("http://localhost/api/tasks", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: "project-1", title: "No launch", prompt: "Do not select unavailable tools", agentId: AgentId.CLAUDE_CODE }),
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({ error: "Selected agent is unavailable" });
   });
 
   it("returns the requested task only", async () => {

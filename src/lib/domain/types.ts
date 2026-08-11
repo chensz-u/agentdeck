@@ -17,6 +17,21 @@ export enum ExecutionMode {
   ISOLATED_WORKTREE = "ISOLATED_WORKTREE",
 }
 
+export enum AgentId {
+  CODEX = "codex",
+  CLAUDE_CODE = "claude-code",
+  OPENCODE = "opencode",
+  CLINE = "cline",
+  CUSTOM_CLI = "custom-cli",
+}
+
+export enum AgentAvailability {
+  AVAILABLE = "AVAILABLE",
+  UNAVAILABLE = "UNAVAILABLE",
+}
+
+export type AgentCapability = "WORKTREE" | "HUMAN_INPUT" | "READ_ONLY_OUTPUT";
+
 export enum WorktreeStatus {
   CREATING = "CREATING",
   READY = "READY",
@@ -72,6 +87,7 @@ export type Task = {
   status: TaskStatus;
   executionMode?: ExecutionMode;
   worktreeId?: string | null;
+  agentId?: AgentId;
   createdAt: Date;
   updatedAt: Date;
 };
@@ -90,6 +106,8 @@ export type AgentRun = {
   threadId?: string | null;
   turnId?: string | null;
   inputState?: RunInputState;
+  agentVersion?: string | null;
+  agentAvailability?: AgentAvailability;
 };
 
 export type Worktree = {

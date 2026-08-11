@@ -15,6 +15,8 @@ import { TaskLifecycleService } from "../services/task-lifecycle-service";
 import { WorktreeService } from "../services/worktree-service";
 import { ReviewService } from "../services/review-service";
 import { LocalRepository } from "./local-repository";
+import { AgentRegistry } from "../agents/agent-registry";
+import { AgentAvailability } from "../domain/types";
 
 export type ServerComposition = {
   repository: LocalRepository;
@@ -26,7 +28,17 @@ export type ServerComposition = {
   humanInputService: HumanInputService;
   runEventBus: RunEventBus;
   runEventStore: RunEventStore;
+  agentRegistry: AgentRegistry;
 };
+
+function detectCodex(): { availability: AgentAvailability; version: string | null } {
+  try {
+    const version = execFileSync("codex", ["--version"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    return { availability: AgentAvailability.AVAILABLE, version: version || null };
+  } catch {
+    return { availability: AgentAvailability.UNAVAILABLE, version: null };
+  }
+}
 
 class ControlledE2eAdapter implements CodexAdapter {
   private readonly completions = new Map<string, (result: { exitCode: number }) => void>();
@@ -84,10 +96,14 @@ function createServerComposition(): ServerComposition {
     ? new ControlledE2eAdapter()
     : new FallbackCodexAdapter(new AppServerAdapter(), new ExecFallbackAdapter());
   const humanInputService = new HumanInputService({ repository, adapter });
+  const agentRegistry = new AgentRegistry({ codex: process.env.AGENTDECK_E2E_STUB === "1"
+    ? { availability: AgentAvailability.AVAILABLE, version: "controlled-e2e" }
+    : detectCodex() });
   const worktreeService = new WorktreeService({ repository });
   const reviewService = new ReviewService({ repository });
   return {
     repository,
+    agentRegistry,
     taskService: new TaskService(repository),
     taskLifecycleService: new TaskLifecycleService(repository),
     worktreeService,

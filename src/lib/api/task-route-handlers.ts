@@ -1,6 +1,7 @@
 import { z } from "zod";
 
-import { ExecutionMode, HumanInputAction, TaskStatus, type AgentRun, type HumanInputAuditEntry, type Task, type Worktree } from "../domain/types";
+import { AgentId, ExecutionMode, HumanInputAction, TaskStatus, type AgentRun, type HumanInputAuditEntry, type Task, type Worktree } from "../domain/types";
+import { AgentRegistry } from "../agents/agent-registry";
 import type { RegisteredProject } from "../services/project-service";
 import { TaskService, type TaskRepository } from "../services/task-service";
 
@@ -9,6 +10,7 @@ const createTaskSchema = z.object({
   title: z.string().trim().min(1),
   prompt: z.string().trim().min(1),
   executionMode: z.nativeEnum(ExecutionMode).default(ExecutionMode.CURRENT_WORKSPACE),
+  agentId: z.nativeEnum(AgentId).default(AgentId.CODEX),
 }).strict();
 
 type RouteContext = { params: Promise<{ id: string }> };
@@ -18,7 +20,7 @@ export interface TaskApiStore extends TaskRepository {
   listTasks(projectId?: string): Promise<Task[]>;
 }
 
-export function createTaskRouteHandlers(repository: TaskApiStore) {
+export function createTaskRouteHandlers(repository: TaskApiStore, registry?: AgentRegistry) {
   const service = new TaskService(repository);
 
   return {
@@ -46,6 +48,11 @@ export function createTaskRouteHandlers(repository: TaskApiStore) {
       }
       if (input.data.executionMode === ExecutionMode.ISOLATED_WORKTREE && !project.isGitRepository) {
         return Response.json({ error: "Isolated worktrees require a Git project" }, { status: 400 });
+      }
+      try {
+        registry?.requireAvailable(input.data.agentId);
+      } catch {
+        return Response.json({ error: "Selected agent is unavailable" }, { status: 400 });
       }
       return Response.json(await service.createTask(input.data), { status: 201 });
     },
