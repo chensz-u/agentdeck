@@ -2,7 +2,7 @@ import nextPlugin from "@next/eslint-plugin-next";
 import tsParser from "@typescript-eslint/parser";
 
 export default [
-  { ignores: [".next/**", "node_modules/**"] },
+  { ignores: [".next/**", ".worktrees/**", "node_modules/**"] },
   {
     files: ["**/*.{js,mjs,cjs,ts,tsx}"],
     languageOptions: {
